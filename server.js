@@ -7,7 +7,7 @@ const path = require('path');
 const fs = require('fs');
 
 // Load environment variables from .env file
-dotenv.config();
+dotenv.config({ path: path.join(__dirname, '.env'), override: true });
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -48,15 +48,25 @@ const fileFilter = (req, file, cb) => {
     if (allowedMimeTypes.includes(file.mimetype)) {
         cb(null, true);
     } else {
-        cb(new Error('Invalid file format. Only PNG, JPG, JPEG, WEBP, and PDF files are allowed.'), false);
+        cb(new Error(`Invalid file format for ${file.originalname}. Only PNG, JPG, JPEG, WEBP, and PDF files are allowed.`), false);
     }
 };
 
 const upload = multer({
     storage: storage,
-    limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB limit
+    limits: { fileSize: 15 * 1024 * 1024 }, // 15 MB limit per file
     fileFilter: fileFilter
 });
+
+// Helper: Format bytes to human readable string
+function formatBytes(bytes, decimals = 2) {
+    if (bytes === 0) return '0 Bytes';
+    const k = 1024;
+    const dm = decimals < 0 ? 0 : decimals;
+    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+}
 
 // Utility: Escape XML special characters
 function escapeXml(unsafe) {
@@ -96,7 +106,6 @@ function generateTallyXml(data, options = { safeEduMode: true }) {
         roundoff_ledger = 'Round Off'
     } = data;
 
-    // Format date to YYYYMMDD (or YYYYMM01 for Tally Educational Mode)
     let dateFormatted = '';
     if (invoice_date) {
         const d = new Date(invoice_date);
@@ -132,7 +141,6 @@ function generateTallyXml(data, options = { safeEduMode: true }) {
     xml += `      </REQUESTDESC>\n`;
     xml += `      <REQUESTDATA>\n`;
 
-    // Ledger Creation block for vendor
     xml += `        <TALLYMESSAGE xmlns:UDF="TallyUDF">\n`;
     xml += `          <LEDGER NAME="${escapeXml(cleanVendor)}" ACTION="Create">\n`;
     xml += `            <NAME>${escapeXml(cleanVendor)}</NAME>\n`;
@@ -144,7 +152,6 @@ function generateTallyXml(data, options = { safeEduMode: true }) {
     xml += `          </LEDGER>\n`;
     xml += `        </TALLYMESSAGE>\n`;
 
-    // Voucher Creation block
     xml += `        <TALLYMESSAGE xmlns:UDF="TallyUDF">\n`;
     xml += `          <VOUCHER VCHTYPE="Purchase" ACTION="Create">\n`;
     xml += `            <DATE>${dateFormatted}</DATE>\n`;
@@ -154,7 +161,6 @@ function generateTallyXml(data, options = { safeEduMode: true }) {
     xml += `            <PARTYLEDGERNAME>${escapeXml(cleanVendor)}</PARTYLEDGERNAME>\n`;
     xml += `            <PERSISTEDVIEW>Accounting Voucher View</PERSISTEDVIEW>\n`;
 
-    // Vendor Entry (Credit = Negative in Tally XML)
     xml += `            <ALLLEDGERENTRIES.LIST>\n`;
     xml += `              <LEDGERNAME>${escapeXml(cleanVendor)}</LEDGERNAME>\n`;
     xml += `              <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>\n`;
@@ -166,7 +172,6 @@ function generateTallyXml(data, options = { safeEduMode: true }) {
     xml += `              </BILLALLOCATIONS.LIST>\n`;
     xml += `            </ALLLEDGERENTRIES.LIST>\n`;
 
-    // Purchase Entry (Debit = Positive)
     if (taxable_amount > 0) {
         xml += `            <ALLLEDGERENTRIES.LIST>\n`;
         xml += `              <LEDGERNAME>${escapeXml(purchase_ledger)}</LEDGERNAME>\n`;
@@ -175,7 +180,6 @@ function generateTallyXml(data, options = { safeEduMode: true }) {
         xml += `            </ALLLEDGERENTRIES.LIST>\n`;
     }
 
-    // CGST
     if (cgst_amount > 0) {
         xml += `            <ALLLEDGERENTRIES.LIST>\n`;
         xml += `              <LEDGERNAME>${escapeXml(cgst_ledger)}</LEDGERNAME>\n`;
@@ -184,7 +188,6 @@ function generateTallyXml(data, options = { safeEduMode: true }) {
         xml += `            </ALLLEDGERENTRIES.LIST>\n`;
     }
 
-    // SGST
     if (sgst_amount > 0) {
         xml += `            <ALLLEDGERENTRIES.LIST>\n`;
         xml += `              <LEDGERNAME>${escapeXml(sgst_ledger)}</LEDGERNAME>\n`;
@@ -193,7 +196,6 @@ function generateTallyXml(data, options = { safeEduMode: true }) {
         xml += `            </ALLLEDGERENTRIES.LIST>\n`;
     }
 
-    // IGST
     if (igst_amount > 0) {
         xml += `            <ALLLEDGERENTRIES.LIST>\n`;
         xml += `              <LEDGERNAME>${escapeXml(igst_ledger)}</LEDGERNAME>\n`;
@@ -202,7 +204,6 @@ function generateTallyXml(data, options = { safeEduMode: true }) {
         xml += `            </ALLLEDGERENTRIES.LIST>\n`;
     }
 
-    // Roundoff
     if (roundoff_amount !== 0) {
         const isPos = roundoff_amount > 0;
         xml += `            <ALLLEDGERENTRIES.LIST>\n`;
@@ -224,19 +225,18 @@ function generateTallyXml(data, options = { safeEduMode: true }) {
 
 // Utility: Audit math check & status calculation
 function auditInvoiceData(raw) {
-    const taxable = parseFloat(raw.taxable_amount || 0);
+    const taxable = parseFloat(raw.taxable_amount || raw.taxableAmount || 0);
     const cgst = parseFloat(raw.cgst_amount || 0);
     const sgst = parseFloat(raw.sgst_amount || 0);
     const igst = parseFloat(raw.igst_amount || 0);
-    let roundoff = parseFloat(raw.roundoff_amount || 0);
-    const grandTotal = parseFloat(raw.grand_total || 0);
+    let roundoff = parseFloat(raw.roundoff_amount || raw.roundoffAmount || 0);
+    const grandTotal = parseFloat(raw.grand_total || raw.totalAmount || 0);
 
     const calculatedSubtotal = Math.round((taxable + cgst + sgst + igst) * 100) / 100;
     const diffWithRoundoff = Math.round((grandTotal - (calculatedSubtotal + roundoff)) * 100) / 100;
 
     let mathDiff = diffWithRoundoff;
 
-    // Auto round-off allocation if difference is within ₹1.00 tolerance
     if (Math.abs(diffWithRoundoff) > 0 && Math.abs(diffWithRoundoff) <= 1.0) {
         roundoff = Math.round((grandTotal - calculatedSubtotal) * 100) / 100;
         mathDiff = 0.0;
@@ -244,22 +244,24 @@ function auditInvoiceData(raw) {
         mathDiff = 0.0;
     }
 
-    const vendorName = (raw.vendor_name || '').trim();
-    const invNum = (raw.invoice_number || '').trim();
+    const vendorName = (raw.vendor_name || raw.vendorName || '').trim();
+    const invNum = (raw.invoice_number || raw.invoiceNumber || '').trim();
     const gstin = (raw.gstin || '').trim();
-    const isGstinValid = gstin ? validateGstin(gstin) : true;
+    const isGstinValid = gstin ? validateGstin(gstin) : false;
     const hasEssentialFields = Boolean(vendorName && invNum && grandTotal > 0);
 
-    let status = 'Needs Review';
+    let status = 'needs_review';
     if (mathDiff !== 0.0) {
-        status = 'Math Error';
+        status = 'math_error';
     } else if (hasEssentialFields && isGstinValid) {
-        status = 'Verified';
+        status = 'verified';
+    } else if (hasEssentialFields) {
+        status = 'needs_review';
     }
 
     return {
         invoice_number: invNum,
-        invoice_date: raw.invoice_date || '',
+        invoice_date: raw.invoice_date || raw.invoiceDate || '',
         vendor_name: vendorName,
         gstin: gstin.toUpperCase(),
         taxable_amount: taxable,
@@ -268,7 +270,7 @@ function auditInvoiceData(raw) {
         igst_amount: igst,
         roundoff_amount: roundoff,
         grand_total: grandTotal,
-        status: status,
+        verification_state: status,
         math_difference: mathDiff
     };
 }
@@ -283,98 +285,143 @@ function fileToGenerativePart(filePath, mimeType) {
     };
 }
 
-// =========================================================================
-// API ENDPOINT: POST /api/extract-invoice
-// Secure invoice extraction endpoint using server-side Gemini API key
-// =========================================================================
-app.post('/api/extract-invoice', upload.single('file'), async (req, res) => {
-    let filePath = null;
+// Helper: Call Gemini AI with fallback from 2.5-flash to 1.5-flash
+async function processFileWithGemini(genAI, filePath, mimeType) {
+    const imagePart = fileToGenerativePart(filePath, mimeType);
+    const prompt = `
+    Extract invoice metadata from this Indian vendor invoice image or document.
+    Return a valid JSON object with the following exact keys:
+    - "invoice_number": (string) Unique invoice or bill number
+    - "invoice_date": (string) Date in YYYY-MM-DD format
+    - "vendor_name": (string) Supplier/seller company full name
+    - "gstin": (string) 15-character GSTIN number of the vendor (supplier)
+    - "taxable_amount": (number) Subtotal taxable amount before tax
+    - "cgst_amount": (number) Central GST amount (0.0 if not present)
+    - "sgst_amount": (number) State GST amount (0.0 if not present)
+    - "igst_amount": (number) Integrated GST amount (0.0 if not present)
+    - "roundoff_amount": (number) Rounding adjustment amount
+    - "grand_total": (number) Final payable total amount
+
+    Ensure numeric amounts are precise numbers without currency symbols.
+    `;
+
+    const modelsToTry = ['gemini-2.5-flash', 'gemini-1.5-flash'];
+    let lastError = null;
+
+    for (const modelName of modelsToTry) {
+        try {
+            const model = genAI.getGenerativeModel({
+                model: modelName,
+                generationConfig: {
+                    responseMimeType: 'application/json',
+                    temperature: 0.1
+                }
+            });
+
+            const result = await model.generateContent([prompt, imagePart]);
+            const responseText = result.response.text();
+            return JSON.parse(responseText);
+        } catch (err) {
+            console.warn(`[Gemini AI] Model ${modelName} failed:`, err.message);
+            lastError = err;
+        }
+    }
+
+    throw new Error(`AI extraction failed: ${lastError ? lastError.message : 'Unknown error'}`);
+}
+
+// API ENDPOINT: POST /api/extract-invoice (Supports single file or multi-file upload)
+app.post('/api/extract-invoice', upload.any(), async (req, res) => {
+    const uploadedFiles = req.files || [];
 
     try {
-        // 1. Validate File Upload
-        if (!req.file) {
+        if (!uploadedFiles || uploadedFiles.length === 0) {
             return res.status(400).json({
                 success: false,
-                error: 'No invoice file uploaded. Please select a valid PNG, JPG, or PDF file.'
+                error: 'No invoice files uploaded. Please select PNG, JPG, WEBP, or PDF files.'
             });
         }
 
-        filePath = req.file.path;
-
-        // 2. Validate Server-side API Key Configuration
         const apiKey = process.env.GEMINI_API_KEY;
         if (!apiKey || apiKey === 'your_gemini_api_key_here' || apiKey.trim() === '') {
+            uploadedFiles.forEach(f => { if (fs.existsSync(f.path)) fs.unlink(f.path, () => {}); });
             return res.status(500).json({
                 success: false,
-                error: 'Gemini API Key is not configured on the backend server. Please set GEMINI_API_KEY in your server .env file.'
+                error: 'Gemini API Key is not configured on the backend server. Please set GEMINI_API_KEY in your .env file.'
             });
         }
 
-        // 3. Initialize Gemini Client
         const genAI = new GoogleGenerativeAI(apiKey);
-        const model = genAI.getGenerativeModel({
-            model: 'gemini-1.5-flash',
-            generationConfig: {
-                responseMimeType: 'application/json',
-                temperature: 0.1
+        const processedInvoices = [];
+
+        for (let i = 0; i < uploadedFiles.length; i++) {
+            const file = uploadedFiles[i];
+            try {
+                const extractedRaw = await processFileWithGemini(genAI, file.path, file.mimetype);
+                const audited = auditInvoiceData(extractedRaw);
+                const xml = generateTallyXml(audited);
+
+                processedInvoices.push({
+                    id: `inv_${Date.now()}_${i}_${Math.random().toString(36).substring(2, 7)}`,
+                    fileName: file.originalname,
+                    fileSize: formatBytes(file.size),
+                    fileType: file.mimetype.includes('pdf') ? 'pdf' : 'image',
+                    invoiceNumber: audited.invoice_number,
+                    invoiceDate: audited.invoice_date,
+                    vendorName: audited.vendor_name,
+                    gstin: audited.gstin,
+                    taxableAmount: audited.taxable_amount,
+                    taxBreakdown: {
+                        cgst: audited.cgst_amount,
+                        sgst: audited.sgst_amount,
+                        igst: audited.igst_amount
+                    },
+                    roundoffAmount: audited.roundoff_amount,
+                    totalAmount: audited.grand_total,
+                    verificationState: audited.verification_state,
+                    mathDifference: audited.math_difference,
+                    tallyXml: xml,
+                    uploadedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                });
+
+            } catch (fileErr) {
+                console.error(`Error processing file ${file.originalname}:`, fileErr);
+                processedInvoices.push({
+                    id: `inv_${Date.now()}_${i}_err`,
+                    fileName: file.originalname,
+                    fileSize: formatBytes(file.size),
+                    fileType: file.mimetype.includes('pdf') ? 'pdf' : 'image',
+                    invoiceNumber: 'ERR',
+                    invoiceDate: '',
+                    vendorName: 'Extraction Failed',
+                    gstin: '',
+                    taxableAmount: 0,
+                    taxBreakdown: { cgst: 0, sgst: 0, igst: 0 },
+                    roundoffAmount: 0,
+                    totalAmount: 0,
+                    verificationState: 'needs_review',
+                    mathDifference: 0,
+                    tallyXml: '',
+                    errorText: fileErr.message
+                });
+            } finally {
+                if (fs.existsSync(file.path)) {
+                    fs.unlink(file.path, () => {});
+                }
             }
-        });
-
-        // 4. Prepare Media Content
-        const imagePart = fileToGenerativePart(filePath, req.file.mimetype);
-
-        const prompt = `
-        Extract invoice metadata from this Indian vendor invoice.
-        Return a valid JSON object with the following exact keys:
-        - "invoice_number": (string) Unique invoice or bill number
-        - "invoice_date": (string) Date in YYYY-MM-DD format
-        - "vendor_name": (string) Supplier/seller company full name
-        - "gstin": (string) 15-character GSTIN number of the vendor (supplier)
-        - "taxable_amount": (number) Subtotal taxable amount before tax
-        - "cgst_amount": (number) Central GST amount (0.0 if not present)
-        - "sgst_amount": (number) State GST amount (0.0 if not present)
-        - "igst_amount": (number) Integrated GST amount (0.0 if not present)
-        - "roundoff_amount": (number) Rounding adjustment amount
-        - "grand_total": (number) Final payable total amount
-
-        Ensure numeric amounts are precise numbers without currency symbols.
-        `;
-
-        // 5. Call Gemini AI Server-Side
-        const result = await model.generateContent([prompt, imagePart]);
-        const responseText = result.response.text();
-        
-        let extractedRaw;
-        try {
-            extractedRaw = JSON.parse(responseText);
-        } catch (jsonErr) {
-            throw new Error(`Failed to parse AI response into JSON: ${responseText}`);
         }
 
-        // 6. Audit & Format Data
-        const auditedData = auditInvoiceData(extractedRaw);
-
-        // 7. Generate Tally XML
-        const tallyXml = generateTallyXml(auditedData);
-        auditedData.tally_xml = tallyXml;
-
-        // 8. Clean up uploaded file from disk asynchronously
-        fs.unlink(filePath, () => {});
-
-        // 9. Return JSON Response to Client
         return res.status(200).json({
             success: true,
-            message: 'Invoice extracted and transformed to Tally XML successfully',
-            data: auditedData
+            message: `${processedInvoices.length} invoice(s) processed successfully`,
+            data: processedInvoices
         });
 
     } catch (err) {
-        // Clean up file if error occurs
-        if (filePath && fs.existsSync(filePath)) {
-            fs.unlink(filePath, () => {});
-        }
-
-        console.error('Invoice Extraction Error:', err.message);
+        uploadedFiles.forEach(f => {
+            if (fs.existsSync(f.path)) fs.unlink(f.path, () => {});
+        });
+        console.error('Extraction Error:', err.message);
         return res.status(500).json({
             success: false,
             error: err.message || 'An unexpected error occurred during invoice processing.'
@@ -384,12 +431,14 @@ app.post('/api/extract-invoice', upload.single('file'), async (req, res) => {
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
-    const isApiKeyConfigured = Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'your_gemini_api_key_here');
+    const key = (process.env.GEMINI_API_KEY || '').trim();
+    const isApiKeyConfigured = Boolean(key && key !== 'your_gemini_api_key_here');
     res.json({
         status: 'online',
         service: 'TallyFlow AI Backend Middleware',
         security: {
             api_key_configured: isApiKeyConfigured,
+            key_length: key.length,
             frontend_key_exposed: false
         }
     });
@@ -414,3 +463,4 @@ app.listen(PORT, () => {
     console.log(`🚀 API Endpoint:   http://localhost:${PORT}/api/extract-invoice`);
     console.log(`========================================================`);
 });
+
