@@ -1,0 +1,663 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TallyFlow AI - GST Invoice Automator for TallyPrime</title>
+
+    <!-- Material Symbols & Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Geist:wght@100..900&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <!-- Tailwind CSS with Design Tokens -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    colors: {
+                        "primary": "#0f172a",
+                        "on-primary": "#ffffff",
+                        "primary-container": "#131b2e",
+                        "on-primary-container": "#7c839b",
+                        "secondary": "#0284c7",
+                        "on-secondary": "#ffffff",
+                        "secondary-container": "#5bb8fe",
+                        "on-secondary-container": "#00476e",
+                        "tertiary": "#059669",
+                        "on-tertiary": "#ffffff",
+                        "tertiary-container": "#ecfdf5",
+                        "on-tertiary-container": "#069669",
+                        "background": "#f8fafc",
+                        "on-background": "#0b1c30",
+                        "surface": "#ffffff",
+                        "surface-dim": "#cbdbf5",
+                        "surface-bright": "#f8f9ff",
+                        "surface-container-lowest": "#ffffff",
+                        "surface-container-low": "#eff4ff",
+                        "surface-container": "#e5eeff",
+                        "surface-container-high": "#dce9ff",
+                        "surface-container-highest": "#d3e4fe",
+                        "on-surface": "#0b1c30",
+                        "on-surface-variant": "#45464d",
+                        "outline": "#76777d",
+                        "outline-variant": "#c6c6cd",
+                        "error": "#e11d48",
+                        "on-error": "#ffffff",
+                        "error-container": "#fff1f2",
+                        "on-error-container": "#93000a"
+                    },
+                    borderRadius: {
+                        "DEFAULT": "0.25rem",
+                        "sm": "0.125rem",
+                        "md": "0.375rem",
+                        "lg": "0.5rem",
+                        "xl": "0.75rem",
+                        "full": "9999px"
+                    },
+                    spacing: {
+                        "space-xs": "0.25rem",
+                        "space-sm": "0.375rem",
+                        "space-md": "0.75rem",
+                        "space-lg": "1rem",
+                        "space-xl": "1.5rem",
+                        "gutter": "1rem",
+                        "gutter-compact": "0.5rem"
+                    },
+                    fontFamily: {
+                        "body-md": ["Geist", "sans-serif"],
+                        "title-md": ["Geist", "sans-serif"],
+                        "headline-sm": ["Geist", "sans-serif"],
+                        "headline-md": ["Geist", "sans-serif"],
+                        "headline-lg": ["Geist", "sans-serif"],
+                        "label-md": ["Geist", "sans-serif"],
+                        "data-tabular": ["JetBrains Mono", "monospace"],
+                        "currency-md": ["JetBrains Mono", "monospace"],
+                        "currency-lg": ["JetBrains Mono", "monospace"]
+                    }
+                }
+            }
+        };
+    </script>
+    <style>
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: #f1f5f9; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+        .xml-code { font-family: 'JetBrains Mono', monospace; font-size: 0.8125rem; }
+    </style>
+</head>
+<body class="bg-background font-body-md text-on-surface antialiased min-h-screen">
+
+    <!-- TOP GLOBAL HEADER -->
+    <header class="fixed top-0 left-0 right-0 h-14 bg-surface-container-lowest border-b border-outline-variant z-50 px-gutter flex items-center justify-between shadow-xs">
+        <div class="flex items-center gap-space-md">
+            <div class="flex items-center gap-2">
+                <div class="w-8 h-8 rounded bg-primary flex items-center justify-center text-on-primary font-bold text-lg">⚡</div>
+                <div class="flex flex-col">
+                    <span class="font-title-md text-title-md text-on-surface tracking-tight leading-none font-bold">TallyFlow AI</span>
+                    <span class="font-label-md text-[11px] text-outline font-normal mt-0.5">GST Invoice Automator for TallyPrime</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="flex items-center gap-space-md">
+            <!-- Security Badge: Server-Side API Key Secured -->
+            <div class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-surface-container-low border border-outline-variant font-label-md text-label-md text-on-surface-variant">
+                <span class="flex h-2 w-2 relative">
+                    <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-on-tertiary-container opacity-75"></span>
+                    <span class="relative inline-flex rounded-full h-2 w-2 bg-on-tertiary-container"></span>
+                </span>
+                <span class="font-medium text-on-tertiary-container">🔒 Gemini API Secured via Backend .env</span>
+            </div>
+
+            <div class="inline-flex items-center gap-1.5 px-2 py-1 rounded bg-surface-container border border-outline-variant font-label-md text-label-md text-on-surface-variant">
+                <span class="material-symbols-outlined text-[16px] text-outline">database</span>
+                <span>Tally ODBC 9000</span>
+            </div>
+
+            <div class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-surface-container-low border border-outline-variant font-body-sm text-body-sm text-on-surface">
+                <span class="material-symbols-outlined text-[16px] text-secondary">domain</span>
+                <span class="font-medium">Tata Motors Ltd. (FY 24-25)</span>
+            </div>
+
+            <div class="w-8 h-8 rounded-full bg-primary flex items-center justify-center">
+                <span class="material-symbols-outlined text-on-primary text-[18px]">person</span>
+            </div>
+        </div>
+    </header>
+
+    <!-- LEFT NAVIGATION SIDEBAR -->
+    <aside class="fixed left-0 top-14 bottom-14 w-60 bg-surface-container-lowest border-r border-outline-variant z-40 flex flex-col py-space-md">
+        <nav class="flex-1 px-space-sm space-y-1">
+            <a href="#" class="flex items-center gap-space-sm px-space-md py-2 rounded bg-primary-container text-on-primary font-title-md">
+                <span class="material-symbols-outlined text-[18px]">receipt_long</span>
+                <span>Invoice Workbench</span>
+            </a>
+            <a href="#" class="flex items-center gap-space-sm px-space-md py-2 rounded text-body-sm text-on-surface-variant hover:bg-surface-container hover:text-on-surface transition-colors">
+                <span class="material-symbols-outlined text-[18px]">sync_alt</span>
+                <span>GSTIN Reconciliation</span>
+            </a>
+            <a href="#" class="flex items-center gap-space-sm px-space-md py-2 rounded text-body-sm text-on-surface-variant hover:bg-surface-container hover:text-on-surface transition-colors">
+                <span class="material-symbols-outlined text-[18px]">category</span>
+                <span>HSN Code Mapping</span>
+            </a>
+            <a href="#" class="flex items-center gap-space-sm px-space-md py-2 rounded text-body-sm text-on-surface-variant hover:bg-surface-container hover:text-on-surface transition-colors">
+                <span class="material-symbols-outlined text-[18px]">list_alt</span>
+                <span>Tally Sync Logs</span>
+            </a>
+            <a href="#" class="flex items-center gap-space-sm px-space-md py-2 rounded text-body-sm text-on-surface-variant hover:bg-surface-container hover:text-on-surface transition-colors">
+                <span class="material-symbols-outlined text-[18px]">store</span>
+                <span>Vendor Master</span>
+            </a>
+        </nav>
+        <div class="px-space-md pt-space-md border-t border-outline-variant">
+            <div class="flex items-center justify-between text-label-md font-label-md text-outline">
+                <span>Tally Connection</span>
+                <span class="text-on-tertiary-container font-medium flex items-center gap-1">
+                    <span class="w-2 h-2 rounded-full bg-on-tertiary-container"></span> Connected
+                </span>
+            </div>
+        </div>
+    </aside>
+
+    <!-- MAIN CONTENT WORKSPACE -->
+    <div class="pl-60">
+        <main class="w-full pt-14 pb-20 bg-background min-h-screen">
+            <div class="flex flex-col w-full">
+
+                <!-- System Active Banner -->
+                <div class="px-gutter pt-space-md pb-0">
+                    <div class="bg-surface-container-lowest border border-outline-variant rounded-lg p-space-md flex items-center justify-between shadow-xs">
+                        <div class="flex items-center gap-space-md">
+                            <div class="w-8 h-8 rounded bg-surface-container-high flex items-center justify-center text-secondary">
+                                <span class="material-symbols-outlined text-[20px]">bolt</span>
+                            </div>
+                            <div class="flex flex-col">
+                                <div class="flex items-center gap-2">
+                                    <span class="font-title-md text-title-md text-on-surface font-semibold">Gemini Multimodal AI OCR Engine Active</span>
+                                    <span class="px-1.5 py-0.5 rounded bg-surface-container font-label-md text-label-md text-secondary font-semibold">Tally Schema v4.1 Compliant</span>
+                                </div>
+                                <span class="font-body-sm text-body-sm text-on-surface-variant">Real-time GSTR-2B matching, auto-HSN cross referencing & arithmetic integrity verification online.</span>
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-space-sm">
+                            <div class="inline-flex items-center gap-2 px-space-md py-1 bg-surface-container-low rounded border border-outline-variant font-label-md text-label-md text-on-surface">
+                                <span class="inline-block w-2 h-2 rounded-full bg-on-tertiary-container animate-pulse"></span>
+                                <span>Backend Route: <code class="font-data-tabular font-bold">/api/extract-invoice</code></span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Main Viewport -->
+                <div class="px-gutter py-space-md space-y-space-md">
+
+                    <!-- TOP SECTION: Drag-and-Drop Ingestion Zone -->
+                    <section aria-label="Invoice Ingestion Area">
+                        <div id="drop-zone" class="group relative border-2 border-dashed border-outline-variant hover:border-secondary bg-surface-container-lowest transition-all p-8 text-center rounded-lg shadow-xs cursor-pointer flex flex-col items-center justify-center">
+                            <div class="w-12 h-12 rounded-lg bg-surface-container-low border border-outline-variant flex items-center justify-center text-outline group-hover:text-secondary group-hover:bg-surface-container transition-colors mb-3">
+                                <span class="material-symbols-outlined text-[28px]">cloud_upload</span>
+                            </div>
+                            <h2 class="font-headline-sm text-headline-sm text-on-surface font-semibold">
+                                Drag & drop vendor invoice images or PDFs here
+                            </h2>
+                            <p class="font-body-sm text-body-sm text-on-surface-variant mt-1 max-w-xl">
+                                Supported formats: JPG, PNG, WEBP, PDF • Processed via secure Node.js backend middleware without exposing API keys
+                            </p>
+                            <div class="mt-4 flex flex-wrap items-center justify-center gap-space-md">
+                                <button type="button" id="btnBrowse" class="h-9 px-space-lg rounded bg-primary text-on-primary hover:bg-primary-container font-title-md text-title-md inline-flex items-center gap-2 shadow-xs transition-colors">
+                                    <span class="material-symbols-outlined text-[18px]">folder_open</span>
+                                    <span>Browse Invoice File</span>
+                                </button>
+                                <div class="flex items-center gap-1.5 font-label-md text-label-md text-on-surface-variant bg-surface-container-low px-2.5 py-1.5 rounded border border-outline-variant">
+                                    <span class="material-symbols-outlined text-[15px] text-outline">keyboard</span>
+                                    <span>Press</span>
+                                    <kbd class="px-1.5 py-0.5 rounded bg-surface-container-lowest border border-outline-variant font-data-tabular text-[11px] font-semibold text-on-surface">⌘+U</kbd>
+                                    <span>to upload</span>
+                                </div>
+                            </div>
+                            <input type="file" id="invoice-file-input" accept=".pdf,.png,.jpg,.jpeg,.webp" class="sr-only">
+                        </div>
+                    </section>
+
+                    <!-- ERROR ALERT BANNER -->
+                    <div id="errorAlert" class="hidden bg-error-container border border-error/30 text-error p-4 rounded-lg flex items-center justify-between">
+                        <div class="flex items-center gap-2">
+                            <span class="material-symbols-outlined">error</span>
+                            <span id="errorMessageText" class="font-body-sm font-medium">An error occurred</span>
+                        </div>
+                        <button type="button" id="btnCloseAlert" class="text-error hover:text-on-error-container"><span class="material-symbols-outlined text-[18px]">close</span></button>
+                    </div>
+
+                    <!-- BOTTOM SECTION: Processing Queue Data Table -->
+                    <section aria-label="Invoice Processing Queue" class="bg-surface-container-lowest border border-outline-variant rounded-lg shadow-xs flex flex-col">
+                        
+                        <!-- Table Filter and Header Actions -->
+                        <div class="p-space-md border-b border-outline-variant flex flex-col md:flex-row md:items-center justify-between gap-space-md bg-surface-container-lowest">
+                            <div class="flex items-center gap-space-md flex-1 min-w-0">
+                                <div class="flex items-center gap-2">
+                                    <h3 class="font-headline-sm text-headline-sm text-on-surface font-semibold">Processing Queue</h3>
+                                    <span class="inline-flex items-center px-2 py-0.5 rounded bg-surface-container text-secondary font-label-md text-label-md font-semibold">Live Queue</span>
+                                </div>
+                            </div>
+                            <div class="flex items-center gap-space-sm flex-wrap">
+                                <div class="relative w-72">
+                                    <span class="material-symbols-outlined absolute left-2.5 top-1/2 -translate-y-1/2 text-[16px] text-outline">search</span>
+                                    <input type="text" id="searchInput" placeholder="Search vendor, invoice no, GSTIN..." class="w-full h-8 pl-8 pr-3 text-body-sm bg-surface-container-lowest border border-outline-variant rounded focus:outline-none focus:border-secondary transition-colors">
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- High-Density Responsive Table -->
+                        <div class="overflow-x-auto w-full">
+                            <table class="w-full text-left border-collapse">
+                                <thead>
+                                    <tr class="h-8 bg-surface-container-low border-b border-outline-variant font-label-md text-label-md text-outline uppercase tracking-wider select-none">
+                                        <th class="w-10 px-3 text-center"><input type="checkbox" checked class="h-3.5 w-3.5 rounded border-outline text-primary"></th>
+                                        <th class="w-12 px-2 text-center">Type</th>
+                                        <th class="px-3 py-1.5 font-semibold text-on-surface-variant">File Details</th>
+                                        <th class="px-3 py-1.5 font-semibold text-on-surface-variant">Detected Vendor / Legal Master</th>
+                                        <th class="px-3 py-1.5 font-semibold text-on-surface-variant">Tax Breakdown</th>
+                                        <th class="px-3 py-1.5 text-right font-semibold text-on-surface-variant">Total Amount (₹)</th>
+                                        <th class="px-3 py-1.5 font-semibold text-on-surface-variant">Verification State</th>
+                                        <th class="px-3 py-1.5 text-right font-semibold text-on-surface-variant">Action</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="invoiceTableBody" class="divide-y divide-outline-variant font-body-sm text-body-sm text-on-surface">
+                                    
+                                    <!-- SAMPLE PRELOADED ROW 1 -->
+                                    <tr class="h-10 hover:bg-surface-container-low/60 transition-colors group">
+                                        <td class="px-3 text-center"><input type="checkbox" checked class="h-3.5 w-3.5 rounded border-outline text-primary"></td>
+                                        <td class="px-2 text-center">
+                                            <div class="inline-flex items-center justify-center w-7 h-7 rounded bg-surface-container border border-outline-variant text-secondary">
+                                                <span class="material-symbols-outlined text-[16px]">image</span>
+                                            </div>
+                                        </td>
+                                        <td class="px-3 py-1">
+                                            <div class="flex flex-col">
+                                                <span class="font-medium text-on-surface">SES_Invoice_01.jpg</span>
+                                                <span class="text-[11px] text-outline font-data-tabular">1.2 MB • Today, 11:24 AM</span>
+                                            </div>
+                                        </td>
+                                        <td class="px-3 py-1">
+                                            <div class="flex flex-col">
+                                                <div class="flex items-center gap-1.5">
+                                                    <span class="font-medium text-on-surface">SES Engineering Pvt Ltd</span>
+                                                    <span class="px-1 py-0.2 rounded bg-surface-container font-data-tabular text-[10px] text-on-tertiary-container font-semibold">99.4% Match</span>
+                                                </div>
+                                                <span class="text-[11px] font-data-tabular text-on-surface-variant">GSTIN: 27AAACS1234F1Z5</span>
+                                            </div>
+                                        </td>
+                                        <td class="px-3 py-1">
+                                            <div class="text-[11px] font-data-tabular text-on-surface-variant flex gap-2">
+                                                <span>CGST: ₹10,887.71</span>
+                                                <span>SGST: ₹10,887.71</span>
+                                            </div>
+                                        </td>
+                                        <td class="px-3 py-1 text-right font-data-tabular text-currency-md font-semibold text-on-surface">
+                                            ₹1,42,850.00
+                                        </td>
+                                        <td class="px-3 py-1">
+                                            <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded border border-on-tertiary-container/30 bg-surface-container text-on-tertiary-container font-label-md text-label-md font-medium">
+                                                <span class="w-1.5 h-1.5 rounded-full bg-on-tertiary-container"></span> Verified
+                                            </span>
+                                        </td>
+                                        <td class="px-3 py-1 text-right">
+                                            <button type="button" onclick="showSampleXml('SES Engineering Pvt Ltd', 'INV-2024-001', 142850)" class="h-7 px-2 rounded bg-surface-container border border-outline-variant hover:bg-surface-container-high text-on-surface font-label-md text-label-md inline-flex items-center gap-1 transition-colors">
+                                                <span>View XML</span>
+                                            </button>
+                                        </td>
+                                    </tr>
+
+                                </tbody>
+                            </table>
+                        </div>
+                    </section>
+
+                    <!-- Metrics Cards -->
+                    <section class="grid grid-cols-1 md:grid-cols-3 gap-space-md">
+                        <div class="bg-surface-container-lowest p-space-md rounded-lg border border-outline-variant shadow-xs flex items-start justify-between">
+                            <div class="space-y-1">
+                                <span class="font-label-md text-label-md text-outline uppercase tracking-wider">HSN Validation Rate</span>
+                                <div class="font-currency-lg text-currency-lg text-on-surface font-bold">100%</div>
+                                <p class="font-body-sm text-body-sm text-on-tertiary-container flex items-center gap-1">
+                                    <span class="material-symbols-outlined text-[14px]">check_circle</span>
+                                    <span>Verified via Gemini AI Backend</span>
+                                </p>
+                            </div>
+                            <div class="w-10 h-10 rounded bg-surface-container flex items-center justify-center text-on-tertiary-container">
+                                <span class="material-symbols-outlined text-[22px]">verified_user</span>
+                            </div>
+                        </div>
+
+                        <div class="bg-surface-container-lowest p-space-md rounded-lg border border-outline-variant shadow-xs flex items-start justify-between">
+                            <div class="space-y-1">
+                                <span class="font-label-md text-label-md text-outline uppercase tracking-wider">Security Architecture</span>
+                                <div class="font-headline-sm text-headline-sm text-on-surface font-semibold">Zero-Trust Frontend</div>
+                                <p class="font-body-sm text-body-sm text-secondary flex items-center gap-1">
+                                    <span class="material-symbols-outlined text-[14px]">shield</span>
+                                    <span>No API keys exposed client-side</span>
+                                </p>
+                            </div>
+                            <div class="w-10 h-10 rounded bg-surface-container-high flex items-center justify-center text-secondary">
+                                <span class="material-symbols-outlined text-[22px]">lock</span>
+                            </div>
+                        </div>
+
+                        <div class="bg-surface-container-lowest p-space-md rounded-lg border border-outline-variant shadow-xs flex items-start justify-between">
+                            <div class="space-y-1">
+                                <span class="font-label-md text-label-md text-outline uppercase tracking-wider">TallyPrime ODBC Driver</span>
+                                <div class="font-headline-sm text-headline-sm text-on-surface font-semibold">Localhost:9000</div>
+                                <p class="font-body-sm text-body-sm text-on-tertiary-container flex items-center gap-1">
+                                    <span class="material-symbols-outlined text-[14px]">cable</span>
+                                    <span>Auto-Voucher Creation Ready</span>
+                                </p>
+                            </div>
+                            <div class="w-10 h-10 rounded bg-surface-container flex items-center justify-center text-on-tertiary-container">
+                                <span class="material-symbols-outlined text-[22px]">sync</span>
+                            </div>
+                        </div>
+                    </section>
+
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- TALLY XML MODAL DRAWER -->
+    <div id="xmlModal" class="hidden fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+        <div class="bg-surface-container-lowest border border-outline-variant rounded-xl max-w-3xl w-full max-h-[85vh] flex flex-col shadow-2xl">
+            <div class="p-4 border-b border-outline-variant flex items-center justify-between">
+                <div class="flex items-center gap-2">
+                    <span class="material-symbols-outlined text-secondary">code</span>
+                    <h3 id="xmlModalTitle" class="font-headline-sm text-headline-sm text-on-surface font-bold">TallyPrime Purchase Voucher XML</h3>
+                </div>
+                <button type="button" id="btnCloseXmlModal" class="text-outline hover:text-on-surface"><span class="material-symbols-outlined">close</span></button>
+            </div>
+            <div class="p-4 flex-1 overflow-y-auto bg-[#020617] rounded-b-xl">
+                <pre id="xmlModalContent" class="xml-code text-[#7dd3fc] whitespace-pre-wrap word-break-all"></pre>
+            </div>
+            <div class="p-4 border-t border-outline-variant flex items-center justify-end gap-2 bg-surface-container-lowest rounded-b-xl">
+                <button type="button" id="btnCopyXmlModal" class="h-9 px-4 rounded bg-surface-container border border-outline-variant hover:bg-surface-container-high text-on-surface font-title-md inline-flex items-center gap-1.5 transition-colors">
+                    <span class="material-symbols-outlined text-[18px]">content_copy</span>
+                    <span id="copyXmlLabel">Copy XML</span>
+                </button>
+                <button type="button" id="btnDownloadXmlModal" class="h-9 px-4 rounded bg-primary text-on-primary hover:bg-primary-container font-title-md inline-flex items-center gap-1.5 transition-colors">
+                    <span class="material-symbols-outlined text-[18px]">download</span>
+                    <span>Download .XML</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- CLIENT FRONTEND BACKEND WIRING SCRIPT -->
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const dropZone = document.getElementById('drop-zone');
+            const fileInput = document.getElementById('invoice-file-input');
+            const btnBrowse = document.getElementById('btnBrowse');
+            const invoiceTableBody = document.getElementById('invoiceTableBody');
+            const errorAlert = document.getElementById('errorAlert');
+            const errorMessageText = document.getElementById('errorMessageText');
+            const btnCloseAlert = document.getElementById('btnCloseAlert');
+
+            const xmlModal = document.getElementById('xmlModal');
+            const btnCloseXmlModal = document.getElementById('btnCloseXmlModal');
+            const xmlModalContent = document.getElementById('xmlModalContent');
+            const xmlModalTitle = document.getElementById('xmlModalTitle');
+            const btnCopyXmlModal = document.getElementById('btnCopyXmlModal');
+            const btnDownloadXmlModal = document.getElementById('btnDownloadXmlModal');
+            const copyXmlLabel = document.getElementById('copyXmlLabel');
+
+            let currentActiveXml = '';
+
+            // Browse button trigger
+            if (btnBrowse) {
+                btnBrowse.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    fileInput.click();
+                });
+            }
+
+            if (dropZone) {
+                dropZone.addEventListener('click', () => fileInput.click());
+                ['dragenter', 'dragover'].forEach(name => {
+                    dropZone.addEventListener(name, (e) => {
+                        e.preventDefault();
+                        dropZone.classList.add('border-secondary', 'bg-surface-container-low');
+                    });
+                });
+                ['dragleave', 'drop'].forEach(name => {
+                    dropZone.addEventListener(name, (e) => {
+                        e.preventDefault();
+                        dropZone.classList.remove('border-secondary', 'bg-surface-container-low');
+                    });
+                });
+                dropZone.addEventListener('drop', (e) => {
+                    if (e.dataTransfer.files.length > 0) {
+                        uploadAndExtractInvoice(e.dataTransfer.files[0]);
+                    }
+                });
+            }
+
+            fileInput.addEventListener('change', (e) => {
+                if (e.target.files.length > 0) {
+                    uploadAndExtractInvoice(e.target.files[0]);
+                }
+            });
+
+            // Cmd+U Shortcut
+            window.addEventListener('keydown', (e) => {
+                if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'u') {
+                    e.preventDefault();
+                    fileInput.click();
+                }
+            });
+
+            btnCloseAlert.addEventListener('click', () => errorAlert.classList.add('hidden'));
+
+            // Core Backend Wiring Function: POST to /api/extract-invoice
+            async function uploadAndExtractInvoice(file) {
+                if (!file) return;
+
+                const rowId = 'row-' + Date.now();
+                const fileName = file.name;
+                const fileSize = (file.size / (1024 * 1024)).toFixed(2) + ' MB';
+                const fileExt = fileName.split('.').pop().toLowerCase();
+                const iconName = fileExt === 'pdf' ? 'picture_as_pdf' : 'image';
+                const iconColor = fileExt === 'pdf' ? 'text-error' : 'text-secondary';
+
+                // 1. Scaffold Loading Row in Table
+                const loadingRowHtml = `
+                    <tr id="${rowId}" class="h-10 bg-surface-container-low/40 hover:bg-surface-container-low transition-colors group">
+                        <td class="px-3 text-center"><input type="checkbox" disabled class="h-3.5 w-3.5 rounded border-outline-variant opacity-50"></td>
+                        <td class="px-2 text-center">
+                            <div class="inline-flex items-center justify-center w-7 h-7 rounded bg-surface-container border border-outline-variant ${iconColor}">
+                                <span class="material-symbols-outlined text-[16px] animate-spin">sync</span>
+                            </div>
+                        </td>
+                        <td class="px-3 py-1">
+                            <div class="flex flex-col">
+                                <span class="font-medium text-on-surface">${escapeHtml(fileName)}</span>
+                                <span class="text-[11px] text-outline font-data-tabular">${fileSize} • Processing via Backend...</span>
+                            </div>
+                        </td>
+                        <td class="px-3 py-1">
+                            <div class="flex flex-col">
+                                <span class="font-medium text-on-surface-variant flex items-center gap-1.5">
+                                    <span>Extracting Metadata...</span>
+                                    <span class="inline-block w-1.5 h-1.5 rounded-full bg-secondary animate-ping"></span>
+                                </span>
+                                <span class="text-[11px] font-data-tabular text-outline">Calling /api/extract-invoice...</span>
+                            </div>
+                        </td>
+                        <td class="px-3 py-1">
+                            <div class="w-28 bg-surface-container rounded-full h-1.5 overflow-hidden">
+                                <div class="bg-secondary h-1.5 rounded-full w-2/3 animate-pulse"></div>
+                            </div>
+                        </td>
+                        <td class="px-3 py-1 text-right font-data-tabular text-currency-md text-outline">Extracting...</td>
+                        <td class="px-3 py-1">
+                            <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded border border-secondary-container bg-surface-container-high text-secondary font-label-md text-label-md font-medium">
+                                <span class="w-1.5 h-1.5 rounded-full bg-secondary animate-ping"></span> Extracting...
+                            </span>
+                        </td>
+                        <td class="px-3 py-1 text-right">
+                            <button disabled class="h-7 px-2.5 rounded bg-surface-container border border-outline-variant text-outline font-label-md text-label-md cursor-not-allowed">Processing</button>
+                        </td>
+                    </tr>
+                `;
+
+                invoiceTableBody.insertAdjacentHTML('afterbegin', loadingRowHtml);
+                errorAlert.classList.add('hidden');
+
+                // 2. Prepare FormData
+                const formData = new FormData();
+                formData.append('file', file);
+
+                try {
+                    // 3. POST to /api/extract-invoice
+                    const response = await fetch('/api/extract-invoice', {
+                        method: 'POST',
+                        body: formData
+                    });
+
+                    const resData = await response.json();
+
+                    if (!response.ok || !resData.success) {
+                        throw new Error(resData.error || 'Failed to extract invoice data.');
+                    }
+
+                    // 4. Update Row with Extracted Response Data
+                    const inv = resData.data;
+                    const row = document.getElementById(rowId);
+                    if (row) {
+                        const statusBadge = inv.status === 'Verified' ?
+                            `<span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded border border-on-tertiary-container/30 bg-surface-container text-on-tertiary-container font-label-md text-label-md font-medium"><span class="w-1.5 h-1.5 rounded-full bg-on-tertiary-container"></span> Verified</span>` :
+                            (inv.status === 'Math Error' ?
+                            `<span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded border border-error bg-error-container text-error font-label-md text-label-md font-semibold"><span class="w-1.5 h-1.5 rounded-full bg-error"></span> Math Error</span>` :
+                            `<span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded border border-outline-variant bg-surface-container-high text-on-secondary-container font-label-md text-label-md font-medium"><span class="w-1.5 h-1.5 rounded-full bg-secondary"></span> Needs Review</span>`);
+
+                        const formattedTotal = '₹' + parseFloat(inv.grand_total || 0).toLocaleString('en-IN', {minimumFractionDigits: 2});
+
+                        // Escape and attach XML
+                        window[rowId + '_xml'] = inv.tally_xml;
+
+                        row.className = 'h-10 hover:bg-surface-container-low/60 transition-colors group';
+                        row.innerHTML = `
+                            <td class="px-3 text-center"><input type="checkbox" checked class="h-3.5 w-3.5 rounded border-outline text-primary"></td>
+                            <td class="px-2 text-center">
+                                <div class="inline-flex items-center justify-center w-7 h-7 rounded bg-surface-container border border-outline-variant ${iconColor}">
+                                    <span class="material-symbols-outlined text-[16px]">${iconName}</span>
+                                </div>
+                            </td>
+                            <td class="px-3 py-1">
+                                <div class="flex flex-col">
+                                    <span class="font-medium text-on-surface">${escapeHtml(fileName)}</span>
+                                    <span class="text-[11px] text-outline font-data-tabular">${fileSize} • Just now</span>
+                                </div>
+                            </td>
+                            <td class="px-3 py-1">
+                                <div class="flex flex-col">
+                                    <div class="flex items-center gap-1.5">
+                                        <span class="font-medium text-on-surface">${escapeHtml(inv.vendor_name || 'Unknown Vendor')}</span>
+                                    </div>
+                                    <span class="text-[11px] font-data-tabular text-on-surface-variant">GSTIN: ${escapeHtml(inv.gstin || 'N/A')}</span>
+                                </div>
+                            </td>
+                            <td class="px-3 py-1">
+                                <div class="text-[11px] font-data-tabular text-on-surface-variant flex gap-2">
+                                    <span>CGST: ₹${parseFloat(inv.cgst_amount || 0).toFixed(2)}</span>
+                                    <span>SGST: ₹${parseFloat(inv.sgst_amount || 0).toFixed(2)}</span>
+                                </div>
+                            </td>
+                            <td class="px-3 py-1 text-right font-data-tabular text-currency-md font-semibold text-on-surface">${formattedTotal}</td>
+                            <td class="px-3 py-1">${statusBadge}</td>
+                            <td class="px-3 py-1 text-right">
+                                <button type="button" onclick="openXmlModal('${rowId}', '${escapeHtml(inv.vendor_name)}')" class="h-7 px-2 rounded bg-surface-container border border-outline-variant hover:bg-surface-container-high text-on-surface font-label-md text-label-md inline-flex items-center gap-1 transition-colors">
+                                    <span>View XML</span>
+                                </button>
+                            </td>
+                        `;
+                    }
+
+                } catch (err) {
+                    console.error(err);
+                    const row = document.getElementById(rowId);
+                    if (row) row.remove();
+
+                    errorMessageText.textContent = err.message || 'Invoice extraction failed.';
+                    errorAlert.classList.remove('hidden');
+                } finally {
+                    fileInput.value = '';
+                }
+            }
+
+            // Modal Handlers
+            window.openXmlModal = function(rowId, vendorName) {
+                currentActiveXml = window[rowId + '_xml'] || '';
+                xmlModalTitle.textContent = `Tally XML: ${vendorName}`;
+                xmlModalContent.textContent = currentActiveXml;
+                xmlModal.classList.remove('hidden');
+            };
+
+            window.showSampleXml = function(vendor, invNo, amount) {
+                currentActiveXml = `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
+  <BODY>
+    <IMPORTDATA>
+      <REQUESTDESC><REPORTNAME>Vouchers</REPORTNAME></REQUESTDESC>
+      <REQUESTDATA>
+        <TALLYMESSAGE xmlns:UDF="TallyUDF">
+          <VOUCHER VCHTYPE="Purchase" ACTION="Create">
+            <VOUCHERNUMBER>${invNo}</VOUCHERNUMBER>
+            <PARTYLEDGERNAME>${vendor}</PARTYLEDGERNAME>
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>${vendor}</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+              <AMOUNT>-${amount}.00</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+          </VOUCHER>
+        </TALLYMESSAGE>
+      </REQUESTDATA>
+    </IMPORTDATA>
+  </BODY>
+</ENVELOPE>`;
+                xmlModalTitle.textContent = `Tally XML: ${vendor}`;
+                xmlModalContent.textContent = currentActiveXml;
+                xmlModal.classList.remove('hidden');
+            };
+
+            btnCloseXmlModal.addEventListener('click', () => xmlModal.classList.add('hidden'));
+
+            btnCopyXmlModal.addEventListener('click', () => {
+                if (!currentActiveXml) return;
+                navigator.clipboard.writeText(currentActiveXml).then(() => {
+                    copyXmlLabel.textContent = 'Copied!';
+                    setTimeout(() => copyXmlLabel.textContent = 'Copy XML', 2000);
+                });
+            });
+
+            btnDownloadXmlModal.addEventListener('click', () => {
+                if (!currentActiveXml) return;
+                const blob = new Blob([currentActiveXml], { type: 'application/xml' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `tally_voucher_${Date.now()}.xml`;
+                a.click();
+                URL.revokeObjectURL(url);
+            });
+
+            function escapeHtml(str) {
+                if (!str) return '';
+                return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+            }
+        });
+    </script>
+</body>
+</html>
