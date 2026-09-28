@@ -301,11 +301,15 @@ async function processFileWithGemini(genAI, filePath, mimeType) {
     - "igst_amount": (number) Integrated GST amount (0.0 if not present)
     - "roundoff_amount": (number) Rounding adjustment amount
     - "grand_total": (number) Final payable total amount
+    - "place_of_supply": (string) Place/State of supply (e.g. Maharashtra)
+    - "narration": (string) Short narration note
+    - "hsn_code": (string) HSN/SAC code of main items
+    - "quantity": (number or string) Item quantity
 
     Ensure numeric amounts are precise numbers without currency symbols.
     `;
 
-    const modelsToTry = ['gemini-2.5-flash', 'gemini-1.5-flash'];
+    const modelsToTry = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash-latest'];
     let lastError = null;
 
     for (const modelName of modelsToTry) {
@@ -330,7 +334,7 @@ async function processFileWithGemini(genAI, filePath, mimeType) {
     throw new Error(`AI extraction failed: ${lastError ? lastError.message : 'Unknown error'}`);
 }
 
-// API ENDPOINT: POST /api/extract-invoice (Supports single file or multi-file upload)
+// API ENDPOINT: POST /api/extract-invoice (Supports concurrent multi-file upload processing)
 app.post('/api/extract-invoice', upload.any(), async (req, res) => {
     const uploadedFiles = req.files || [];
 
@@ -352,64 +356,76 @@ app.post('/api/extract-invoice', upload.any(), async (req, res) => {
         }
 
         const genAI = new GoogleGenerativeAI(apiKey);
-        const processedInvoices = [];
 
-        for (let i = 0; i < uploadedFiles.length; i++) {
-            const file = uploadedFiles[i];
-            try {
-                const extractedRaw = await processFileWithGemini(genAI, file.path, file.mimetype);
-                const audited = auditInvoiceData(extractedRaw);
-                const xml = generateTallyXml(audited);
+        // Concurrent promise execution for all uploaded files
+        const processedInvoices = await Promise.all(
+            uploadedFiles.map(async (file, i) => {
+                try {
+                    const extractedRaw = await processFileWithGemini(genAI, file.path, file.mimetype);
+                    const audited = auditInvoiceData(extractedRaw);
+                    const xml = generateTallyXml(audited);
 
-                processedInvoices.push({
-                    id: `inv_${Date.now()}_${i}_${Math.random().toString(36).substring(2, 7)}`,
-                    fileName: file.originalname,
-                    fileSize: formatBytes(file.size),
-                    fileType: file.mimetype.includes('pdf') ? 'pdf' : 'image',
-                    invoiceNumber: audited.invoice_number,
-                    invoiceDate: audited.invoice_date,
-                    vendorName: audited.vendor_name,
-                    gstin: audited.gstin,
-                    taxableAmount: audited.taxable_amount,
-                    taxBreakdown: {
-                        cgst: audited.cgst_amount,
-                        sgst: audited.sgst_amount,
-                        igst: audited.igst_amount
-                    },
-                    roundoffAmount: audited.roundoff_amount,
-                    totalAmount: audited.grand_total,
-                    verificationState: audited.verification_state,
-                    mathDifference: audited.math_difference,
-                    tallyXml: xml,
-                    uploadedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-                });
-
-            } catch (fileErr) {
-                console.error(`Error processing file ${file.originalname}:`, fileErr);
-                processedInvoices.push({
-                    id: `inv_${Date.now()}_${i}_err`,
-                    fileName: file.originalname,
-                    fileSize: formatBytes(file.size),
-                    fileType: file.mimetype.includes('pdf') ? 'pdf' : 'image',
-                    invoiceNumber: 'ERR',
-                    invoiceDate: '',
-                    vendorName: 'Extraction Failed',
-                    gstin: '',
-                    taxableAmount: 0,
-                    taxBreakdown: { cgst: 0, sgst: 0, igst: 0 },
-                    roundoffAmount: 0,
-                    totalAmount: 0,
-                    verificationState: 'needs_review',
-                    mathDifference: 0,
-                    tallyXml: '',
-                    errorText: fileErr.message
-                });
-            } finally {
-                if (fs.existsSync(file.path)) {
-                    fs.unlink(file.path, () => {});
+                    return {
+                        id: `inv_${Date.now()}_${i}_${Math.random().toString(36).substring(2, 7)}`,
+                        fileName: file.originalname,
+                        fileSize: formatBytes(file.size),
+                        fileType: file.mimetype.includes('pdf') ? 'pdf' : 'image',
+                        invoiceNumber: audited.invoice_number,
+                        invoiceDate: audited.invoice_date,
+                        vendorName: audited.vendor_name,
+                        gstin: audited.gstin,
+                        placeOfSupply: extractedRaw.place_of_supply || 'Maharashtra',
+                        tallyLedgerName: audited.vendor_name ? `${audited.vendor_name} Ledger` : 'Sundry Creditors',
+                        narration: extractedRaw.narration || `Purchase from ${audited.vendor_name || 'Vendor'} vide Invoice #${audited.invoice_number || ''}`,
+                        hsnCode: extractedRaw.hsn_code || '998313',
+                        quantity: extractedRaw.quantity || 1,
+                        taxableAmount: audited.taxable_amount,
+                        taxBreakdown: {
+                            cgst: audited.cgst_amount,
+                            sgst: audited.sgst_amount,
+                            igst: audited.igst_amount
+                        },
+                        roundoffAmount: audited.roundoff_amount,
+                        roundOff: audited.roundoff_amount ? Number(audited.roundoff_amount).toFixed(2) : '0.00',
+                        totalAmount: audited.grand_total,
+                        verificationState: audited.verification_state,
+                        mathDifference: audited.math_difference,
+                        tallyXml: xml,
+                        uploadedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                    };
+                } catch (fileErr) {
+                    console.error(`Error processing file ${file.originalname}:`, fileErr);
+                    return {
+                        id: `inv_${Date.now()}_${i}_err`,
+                        fileName: file.originalname,
+                        fileSize: formatBytes(file.size),
+                        fileType: file.mimetype.includes('pdf') ? 'pdf' : 'image',
+                        invoiceNumber: 'ERR',
+                        invoiceDate: '',
+                        vendorName: 'Extraction Failed',
+                        gstin: '',
+                        placeOfSupply: 'Pending',
+                        tallyLedgerName: 'Pending',
+                        narration: 'N/A',
+                        hsnCode: 'N/A',
+                        quantity: 0,
+                        taxableAmount: 0,
+                        taxBreakdown: { cgst: 0, sgst: 0, igst: 0 },
+                        roundoffAmount: 0,
+                        roundOff: '0.00',
+                        totalAmount: 0,
+                        verificationState: 'needs_review',
+                        mathDifference: 0,
+                        tallyXml: '',
+                        errorText: fileErr.message
+                    };
+                } finally {
+                    if (fs.existsSync(file.path)) {
+                        fs.unlink(file.path, () => {});
+                    }
                 }
-            }
-        }
+            })
+        );
 
         return res.status(200).json({
             success: true,
