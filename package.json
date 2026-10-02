@@ -8,6 +8,8 @@
     "dev": "node --watch server.js"
   },
   "dependencies": {
+    "@clerk/clerk-react": "^5.61.10",
+    "@clerk/clerk-sdk-node": "^4.13.23",
     "@google/generative-ai": "^0.21.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",

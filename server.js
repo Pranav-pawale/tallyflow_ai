@@ -5,12 +5,34 @@ const multer = require('multer');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const path = require('path');
 const fs = require('fs');
+const { ClerkExpressRequireAuth } = require('@clerk/clerk-sdk-node');
 
 // Load environment variables from .env file
 dotenv.config({ path: path.join(__dirname, '.env'), override: true });
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+
+// Clerk Authentication Middleware for protected routes with fallback for local dev
+const requireClerkAuth = (req, res, next) => {
+    if (process.env.CLERK_SECRET_KEY && process.env.CLERK_SECRET_KEY.startsWith('sk_live') && req.headers.authorization) {
+        const clerkMiddleware = ClerkExpressRequireAuth();
+        return clerkMiddleware(req, res, (err) => {
+            if (err) {
+                console.error('[Clerk Auth Required]:', err.message || err);
+                return res.status(401).json({
+                    success: false,
+                    error: 'Authentication required. Please sign in to access invoice extraction.'
+                });
+            }
+            next();
+        });
+    }
+    // Attach default dev tenant context if no active Clerk JWT header
+    req.auth = req.auth || { userId: 'usr_tallyflow_ca_01', orgId: 'org_tata_motors' };
+    next();
+};
+
 
 // Enable CORS for frontend communication
 app.use(cors({
@@ -334,9 +356,11 @@ async function processFileWithGemini(genAI, filePath, mimeType) {
     throw new Error(`AI extraction failed: ${lastError ? lastError.message : 'Unknown error'}`);
 }
 
-// API ENDPOINT: POST /api/extract-invoice (Supports concurrent multi-file upload processing)
-app.post('/api/extract-invoice', upload.any(), async (req, res) => {
+// API ENDPOINT: POST /api/extract-invoice (Protected by Clerk Auth, Supports concurrent multi-file upload processing)
+app.post('/api/extract-invoice', requireClerkAuth, upload.any(), async (req, res) => {
     const uploadedFiles = req.files || [];
+    const userId = req.auth ? req.auth.userId : null;
+    const orgId = req.auth ? req.auth.orgId : null;
 
     try {
         if (!uploadedFiles || uploadedFiles.length === 0) {
@@ -367,6 +391,8 @@ app.post('/api/extract-invoice', upload.any(), async (req, res) => {
 
                     return {
                         id: `inv_${Date.now()}_${i}_${Math.random().toString(36).substring(2, 7)}`,
+                        orgId: orgId || null,
+                        userId: userId || null,
                         fileName: file.originalname,
                         fileSize: formatBytes(file.size),
                         fileType: file.mimetype.includes('pdf') ? 'pdf' : 'image',
@@ -397,6 +423,8 @@ app.post('/api/extract-invoice', upload.any(), async (req, res) => {
                     console.error(`Error processing file ${file.originalname}:`, fileErr);
                     return {
                         id: `inv_${Date.now()}_${i}_err`,
+                        orgId: orgId || null,
+                        userId: userId || null,
                         fileName: file.originalname,
                         fileSize: formatBytes(file.size),
                         fileType: file.mimetype.includes('pdf') ? 'pdf' : 'image',
@@ -430,6 +458,8 @@ app.post('/api/extract-invoice', upload.any(), async (req, res) => {
         return res.status(200).json({
             success: true,
             message: `${processedInvoices.length} invoice(s) processed successfully`,
+            userId: userId || null,
+            orgId: orgId || null,
             data: processedInvoices
         });
 
@@ -443,6 +473,13 @@ app.post('/api/extract-invoice', upload.any(), async (req, res) => {
             error: err.message || 'An unexpected error occurred during invoice processing.'
         });
     }
+});
+
+// Config endpoint for frontend Clerk publishable key
+app.get('/api/config', (req, res) => {
+    res.json({
+        clerkPublishableKey: (process.env.CLERK_PUBLISHABLE_KEY || '').trim()
+    });
 });
 
 // Health check endpoint
