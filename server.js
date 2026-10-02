@@ -328,6 +328,11 @@ async function processFileWithGemini(genAI, filePath, mimeType) {
     - "hsn_code": (string) HSN/SAC code of main items
     - "quantity": (number or string) Item quantity
 
+    STRICT DIRECTIVES:
+    1. If the document is rotated, visually auto-orient it before extraction.
+    2. If the document contains excessive terms or marketing text, ignore it. Extract ONLY the requested JSON keys.
+    3. If a data point (like GSTIN or HSN) is missing, output null for text and 0 for numeric fields. Do NOT refuse to extract the document.
+
     Ensure numeric amounts are precise numbers without currency symbols.
     `;
 
@@ -345,8 +350,14 @@ async function processFileWithGemini(genAI, filePath, mimeType) {
             });
 
             const result = await model.generateContent([prompt, imagePart]);
-            const responseText = result.response.text();
-            return JSON.parse(responseText);
+            let responseText = result.response.text();
+            try {
+                return JSON.parse(responseText);
+            } catch (jsonErr) {
+                // If partial JSON is returned, sanitize it and return it instead of throwing a 500 error
+                const sanitized = responseText.replace(/```json/gi, '').replace(/```/g, '').trim();
+                return JSON.parse(sanitized);
+            }
         } catch (err) {
             console.warn(`[Gemini AI] Model ${modelName} failed:`, err.message);
             lastError = err;

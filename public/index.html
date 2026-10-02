@@ -75,8 +75,11 @@
             const [isDataMappingOpen, setIsDataMappingOpen] = useState(true);
             const [isDataModalOpen, setIsDataModalOpen] = useState(false);
             const [isLoggedIn, setIsLoggedIn] = useState(true);
-            const [selectedCompany, setSelectedCompany] = useState("Tata Motors (FY 24-25)");
+            const [companies, setCompanies] = useState(["Tata Motors (FY 24-25)", "Reliance Retail Ltd", "Infosys Technologies"]);
+            const [selectedCompany, setSelectedCompany] = useState(companies[0]);
             const [isOrgDropdownOpen, setIsOrgDropdownOpen] = useState(false);
+            const [isAddingCompany, setIsAddingCompany] = useState(false);
+            const [newCompanyName, setNewCompanyName] = useState('');
             const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
             const [isAccountMenuOpen, setIsAccountMenuOpen] = useState(false);
 
@@ -106,6 +109,40 @@
             const [activeHoverSection, setActiveHoverSection] = useState(null);
 
             const fileInputRef = useRef(null);
+
+            // Handle Company Deletion
+            const handleDeleteCompany = (companyToDelete, e) => {
+                e.stopPropagation();
+                if (companies.length <= 1) return;
+                
+                const updatedCompanies = companies.filter(c => c !== companyToDelete);
+                setCompanies(updatedCompanies);
+                
+                if (selectedCompany === companyToDelete) {
+                    setSelectedCompany(updatedCompanies[0]);
+                }
+            };
+
+            // Helper: Safe Number Parsing
+            const safeNum = (val) => parseFloat(val) || 0;
+
+            // Handle active invoice input change
+            const handleInvoiceChange = (field, value) => {
+                if (!activeReviewInvoice) return;
+                
+                const updated = { ...activeReviewInvoice };
+                if (field.includes('.')) {
+                    const [parent, child] = field.split('.');
+                    updated[parent] = { ...updated[parent], [child]: value };
+                } else {
+                    updated[field] = value;
+                }
+                
+                setActiveReviewInvoice(updated);
+                
+                // Also update in the main invoices array so changes persist
+                setInvoices(prev => prev.map(inv => inv.id === updated.id ? updated : inv));
+            };
 
             // Helper: Format Rupee Currency
             const formatINR = (val) => {
@@ -356,6 +393,10 @@
                 URL.revokeObjectURL(url);
             };
 
+            // Phase 3 Math Calculations for Audit Review
+            const computedTotalTax = activeReviewInvoice ? safeNum(activeReviewInvoice.taxBreakdown?.cgst) + safeNum(activeReviewInvoice.taxBreakdown?.sgst) + safeNum(activeReviewInvoice.taxBreakdown?.igst) : 0;
+            const computedNetTotal = activeReviewInvoice ? safeNum(activeReviewInvoice.taxableAmount) + computedTotalTax + safeNum(activeReviewInvoice.roundoffAmount) : 0;
+
             return (
                 <React.Fragment>
                     {isLoggedIn ? (
@@ -411,17 +452,73 @@
                                         <div className="px-3 py-1.5 text-[10px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-100">
                                             Select Active Company
                                         </div>
-                                        {["Tata Motors (FY 24-25)", "Reliance Retail Ltd", "Infosys Technologies"].map((comp) => (
+                                        {companies.map((comp) => (
                                             <button
                                                 key={comp}
                                                 type="button"
-                                                onClick={() => { setSelectedCompany(comp); setIsOrgDropdownOpen(false); }}
+                                                onClick={() => { setSelectedCompany(comp); setIsOrgDropdownOpen(false); setIsAddingCompany(false); }}
                                                 className={`w-full text-left px-3 py-1.5 flex items-center justify-between hover:bg-slate-50 transition-colors ${selectedCompany === comp ? 'font-semibold text-blue-600 bg-blue-50/50' : 'text-slate-700'}`}
                                             >
-                                                <span>{comp}</span>
-                                                {selectedCompany === comp && <span className="material-symbols-outlined text-[14px] text-blue-600">check</span>}
+                                                <span className="truncate pr-2">{comp}</span>
+                                                <div className="flex items-center gap-1.5 shrink-0">
+                                                    {selectedCompany === comp && <span className="material-symbols-outlined text-[14px] text-blue-600">check</span>}
+                                                    <div 
+                                                        onClick={(e) => handleDeleteCompany(comp, e)}
+                                                        className="text-slate-400 hover:text-rose-500 p-0.5 rounded transition-colors flex items-center justify-center cursor-pointer"
+                                                        title="Delete company"
+                                                    >
+                                                        <span className="text-[14px] font-bold">&times;</span>
+                                                    </div>
+                                                </div>
                                             </button>
                                         ))}
+                                        <div className="border-t border-slate-100 mt-1">
+                                            {isAddingCompany ? (
+                                                <div className="px-3 py-2 flex items-center gap-2">
+                                                    <input 
+                                                        type="text" 
+                                                        autoFocus 
+                                                        className="text-sm px-2 py-1 w-full border-b border-blue-500 bg-slate-50 focus:outline-none text-slate-700" 
+                                                        placeholder="Enter company name..." 
+                                                        value={newCompanyName}
+                                                        onChange={(e) => setNewCompanyName(e.target.value)}
+                                                        onKeyDown={(e) => {
+                                                            if (e.key === 'Enter' && newCompanyName.trim() !== '') {
+                                                                const trimmed = newCompanyName.trim();
+                                                                if (!companies.includes(trimmed)) {
+                                                                    setCompanies(prev => [...prev, trimmed]);
+                                                                }
+                                                                setSelectedCompany(trimmed);
+                                                                setNewCompanyName('');
+                                                                setIsAddingCompany(false);
+                                                            } else if (e.key === 'Escape') {
+                                                                setIsAddingCompany(false);
+                                                                setNewCompanyName('');
+                                                            }
+                                                        }}
+                                                    />
+                                                    <button 
+                                                        type="button" 
+                                                        className="text-slate-400 hover:text-slate-600 p-1 flex items-center justify-center"
+                                                        onClick={(e) => { e.stopPropagation(); setIsAddingCompany(false); setNewCompanyName(''); }}
+                                                    >
+                                                        <span className="material-symbols-outlined text-[14px]">close</span>
+                                                    </button>
+                                                </div>
+                                            ) : (
+                                                <button
+                                                    type="button"
+                                                    onClick={(e) => {
+                                                        e.preventDefault();
+                                                        setIsAddingCompany(true);
+                                                    }}
+                                                    className="w-full text-left px-3 py-1.5 text-blue-600 hover:bg-slate-50 transition-colors flex items-center gap-1.5"
+                                                >
+                                                    <span className="material-symbols-outlined text-[15px]">add</span>
+                                                    <span>Add Custom Company...</span>
+                                                </button>
+                                            )}
+                                        </div>
                                     </div>
                                 )}
                             </div>
@@ -541,7 +638,34 @@
                                             <span className="material-symbols-outlined text-[16px]">arrow_back</span>
                                             <span>Back to Workbench</span>
                                         </button>
-                                        <span className="text-slate-300">|</span>
+
+                                        {/* Pagination Nav Buttons */}
+                                        <div className="flex items-center gap-1">
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    const idx = invoices.findIndex(i => i.id === activeReviewInvoice.id);
+                                                    if (idx > 0) setActiveReviewInvoice(invoices[idx - 1]);
+                                                }}
+                                                disabled={invoices.findIndex(i => i.id === activeReviewInvoice.id) <= 0}
+                                                className="px-2 py-1 rounded-md bg-slate-50 hover:bg-slate-100 disabled:opacity-50 border border-slate-200 text-slate-600 text-xs font-semibold inline-flex items-center transition-colors"
+                                            >
+                                                &larr; Prev
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    const idx = invoices.findIndex(i => i.id === activeReviewInvoice.id);
+                                                    if (idx < invoices.length - 1) setActiveReviewInvoice(invoices[idx + 1]);
+                                                }}
+                                                disabled={invoices.findIndex(i => i.id === activeReviewInvoice.id) >= invoices.length - 1}
+                                                className="px-2 py-1 rounded-md bg-slate-50 hover:bg-slate-100 disabled:opacity-50 border border-slate-200 text-slate-600 text-xs font-semibold inline-flex items-center transition-colors"
+                                            >
+                                                Next &rarr;
+                                            </button>
+                                        </div>
+
+                                        <span className="text-slate-300 ml-1">|</span>
                                         <div className="flex items-center gap-2">
                                             <span className="text-xs font-bold text-slate-900 font-heading">
                                                 Audit Review: {activeReviewInvoice.fileName}
@@ -687,13 +811,13 @@
                                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
                                                 <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-200/70">
                                                     <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider block mb-0.5">Vendor Name</span>
-                                                    <span className="font-semibold text-slate-800 text-[13px]">{activeReviewInvoice?.vendorName || 'Not detected'}</span>
+                                                    <input type="text" className="w-full bg-white border border-slate-200 rounded px-2 py-1 text-[13px] font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-blue-500" value={activeReviewInvoice?.vendorName || ''} onChange={(e) => handleInvoiceChange('vendorName', e.target.value)} placeholder="Vendor Name" />
                                                 </div>
 
                                                 <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-200/70">
                                                     <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider block mb-0.5">Supplier GSTIN</span>
                                                     <div className="flex items-center gap-1.5">
-                                                        <span className="font-mono font-semibold text-slate-800 text-[13px]">{activeReviewInvoice?.gstin || 'N/A'}</span>
+                                                        <input type="text" className="w-full bg-white border border-slate-200 rounded px-2 py-1 text-[13px] font-mono font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-blue-500" value={activeReviewInvoice?.gstin || ''} onChange={(e) => handleInvoiceChange('gstin', e.target.value)} placeholder="GSTIN" />
                                                         {activeReviewInvoice?.gstin && activeReviewInvoice?.gstin.length === 15 ? (
                                                             <span className="text-[10px] text-emerald-600 font-semibold bg-emerald-100 px-1.5 py-0.2 rounded-full">
                                                                 ✓ Valid
@@ -708,12 +832,12 @@
 
                                                 <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-200/70">
                                                     <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider block mb-0.5">Place of Supply (State)</span>
-                                                    <span className="font-semibold text-slate-700 text-xs">{activeReviewInvoice?.placeOfSupply || 'Maharashtra'}</span>
+                                                    <input type="text" className="w-full bg-white border border-slate-200 rounded px-2 py-1 text-xs font-semibold text-slate-700 focus:outline-none focus:ring-1 focus:ring-blue-500" value={activeReviewInvoice?.placeOfSupply || ''} onChange={(e) => handleInvoiceChange('placeOfSupply', e.target.value)} placeholder="e.g. Maharashtra" />
                                                 </div>
 
                                                 <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-200/70">
                                                     <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider block mb-0.5">Mapped Tally Ledger</span>
-                                                    <span className="font-semibold text-slate-700 text-xs">{activeReviewInvoice?.tallyLedgerName || 'Sundry Creditors'}</span>
+                                                    <input type="text" className="w-full bg-white border border-slate-200 rounded px-2 py-1 text-xs font-semibold text-slate-700 focus:outline-none focus:ring-1 focus:ring-blue-500" value={activeReviewInvoice?.tallyLedgerName || ''} onChange={(e) => handleInvoiceChange('tallyLedgerName', e.target.value)} placeholder="Ledger Name" />
                                                 </div>
                                             </div>
                                         </div>
@@ -738,23 +862,23 @@
                                             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs mb-2.5">
                                                 <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-200/70">
                                                     <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider block mb-0.5">Invoice Number</span>
-                                                    <span className="font-mono font-semibold text-slate-800 text-[13px]">{activeReviewInvoice?.invoiceNumber || 'INV-001'}</span>
+                                                    <input type="text" className="w-full bg-white border border-slate-200 rounded px-2 py-1 text-[13px] font-mono font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500" value={activeReviewInvoice?.invoiceNumber || ''} onChange={(e) => handleInvoiceChange('invoiceNumber', e.target.value)} placeholder="INV-001" />
                                                 </div>
 
                                                 <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-200/70">
                                                     <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider block mb-0.5">Invoice Date</span>
-                                                    <span className="font-mono font-semibold text-slate-800 text-[13px]">{activeReviewInvoice?.invoiceDate || 'N/A'}</span>
+                                                    <input type="date" className="w-full bg-white border border-slate-200 rounded px-2 py-1 text-[13px] font-mono font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500" value={activeReviewInvoice?.invoiceDate || ''} onChange={(e) => handleInvoiceChange('invoiceDate', e.target.value)} />
                                                 </div>
 
                                                 <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-200/70">
                                                     <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider block mb-0.5">Voucher Type</span>
-                                                    <span className="font-semibold text-slate-800 text-[13px]">{activeReviewInvoice?.voucherType || 'Purchase Voucher'}</span>
+                                                    <input type="text" className="w-full bg-white border border-slate-200 rounded px-2 py-1 text-[13px] font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500" value={activeReviewInvoice?.voucherType || ''} onChange={(e) => handleInvoiceChange('voucherType', e.target.value)} placeholder="Purchase Voucher" />
                                                 </div>
                                             </div>
 
                                             <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-200/70 text-xs">
                                                 <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider block mb-0.5">Narration</span>
-                                                <span className="font-medium text-slate-700 text-xs">{activeReviewInvoice?.narration || `Being goods/services purchased from ${activeReviewInvoice?.vendorName || 'vendor'} vide invoice #${activeReviewInvoice?.invoiceNumber || ''}`}</span>
+                                                <textarea className="w-full bg-white border border-slate-200 rounded px-2 py-1 text-xs font-medium text-slate-700 focus:outline-none focus:ring-1 focus:ring-indigo-500" rows="2" value={activeReviewInvoice?.narration || ''} onChange={(e) => handleInvoiceChange('narration', e.target.value)} placeholder="Narration note..."></textarea>
                                             </div>
                                         </div>
 
@@ -789,15 +913,21 @@
                                                     <tbody className="divide-y divide-slate-200/60 text-slate-700">
                                                         <tr>
                                                             <td className="px-3 py-2 font-sans font-medium text-slate-800">
-                                                                <div>{activeReviewInvoice?.itemDescription || 'Goods / Services Purchase'}</div>
+                                                                <input type="text" className="w-full bg-white border border-slate-200 rounded px-1 py-0.5 mb-1 focus:outline-none focus:ring-1 focus:ring-emerald-500 text-xs" value={activeReviewInvoice?.itemDescription || ''} onChange={(e) => handleInvoiceChange('itemDescription', e.target.value)} placeholder="Item Description" />
                                                                 <div className="text-[10px] text-slate-400 font-mono">Ledger: {activeReviewInvoice?.tallyLedgerName || 'Purchase Account'}</div>
                                                             </td>
-                                                            <td className="px-2 py-2 text-center text-slate-600 font-mono">{activeReviewInvoice?.hsnCode || '998313'}</td>
-                                                            <td className="px-2 py-2 text-right text-slate-800 font-semibold font-mono">{activeReviewInvoice?.quantity || 1}</td>
+                                                            <td className="px-2 py-2 text-center text-slate-600 font-mono">
+                                                                <input type="text" className="w-full bg-white border border-slate-200 rounded px-1 py-0.5 text-center focus:outline-none focus:ring-1 focus:ring-emerald-500 text-xs" value={activeReviewInvoice?.hsnCode || ''} onChange={(e) => handleInvoiceChange('hsnCode', e.target.value)} placeholder="HSN" />
+                                                            </td>
+                                                            <td className="px-2 py-2 text-right text-slate-800 font-semibold font-mono">
+                                                                <input type="number" className="w-16 bg-white border border-slate-200 rounded px-1 py-0.5 text-right focus:outline-none focus:ring-1 focus:ring-emerald-500 text-xs" value={activeReviewInvoice?.quantity || ''} onChange={(e) => handleInvoiceChange('quantity', safeNum(e.target.value))} />
+                                                            </td>
                                                             <td className="px-2 py-2 text-right text-slate-600 font-mono">
                                                                 {formatINR(activeReviewInvoice?.taxableAmount ? (activeReviewInvoice.taxableAmount / (activeReviewInvoice.quantity || 1)) : 0)}
                                                             </td>
-                                                            <td className="px-3 py-2 text-right font-semibold text-slate-900 font-mono">{formatINR(activeReviewInvoice?.taxableAmount)}</td>
+                                                            <td className="px-3 py-2 text-right font-semibold text-slate-900 font-mono">
+                                                                <input type="number" className="w-24 bg-white border border-slate-200 rounded px-1 py-0.5 text-right focus:outline-none focus:ring-1 focus:ring-emerald-500 text-xs" value={activeReviewInvoice?.taxableAmount || ''} onChange={(e) => handleInvoiceChange('taxableAmount', safeNum(e.target.value))} />
+                                                            </td>
                                                         </tr>
                                                     </tbody>
                                                 </table>
@@ -824,19 +954,19 @@
                                             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs font-mono mb-2.5">
                                                 <div className="bg-slate-50 p-2 rounded-lg border border-slate-200/70">
                                                     <span className="text-[10px] text-slate-400 block font-sans">CGST</span>
-                                                    <span className="font-semibold text-slate-800">{formatINR(activeReviewInvoice?.taxBreakdown?.cgst)}</span>
+                                                    <input type="number" className="w-full bg-white border border-slate-200 rounded px-1 py-0.5 font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-amber-500 text-xs" value={activeReviewInvoice?.taxBreakdown?.cgst || ''} onChange={(e) => handleInvoiceChange('taxBreakdown.cgst', safeNum(e.target.value))} />
                                                 </div>
                                                 <div className="bg-slate-50 p-2 rounded-lg border border-slate-200/70">
                                                     <span className="text-[10px] text-slate-400 block font-sans">SGST</span>
-                                                    <span className="font-semibold text-slate-800">{formatINR(activeReviewInvoice?.taxBreakdown?.sgst)}</span>
+                                                    <input type="number" className="w-full bg-white border border-slate-200 rounded px-1 py-0.5 font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-amber-500 text-xs" value={activeReviewInvoice?.taxBreakdown?.sgst || ''} onChange={(e) => handleInvoiceChange('taxBreakdown.sgst', safeNum(e.target.value))} />
                                                 </div>
                                                 <div className="bg-slate-50 p-2 rounded-lg border border-slate-200/70">
                                                     <span className="text-[10px] text-slate-400 block font-sans">IGST</span>
-                                                    <span className="font-semibold text-slate-800">{formatINR(activeReviewInvoice?.taxBreakdown?.igst)}</span>
+                                                    <input type="number" className="w-full bg-white border border-slate-200 rounded px-1 py-0.5 font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-amber-500 text-xs" value={activeReviewInvoice?.taxBreakdown?.igst || ''} onChange={(e) => handleInvoiceChange('taxBreakdown.igst', safeNum(e.target.value))} />
                                                 </div>
                                                 <div className="bg-slate-50 p-2 rounded-lg border border-slate-200/70">
                                                     <span className="text-[10px] text-slate-400 block font-sans">Round-Off</span>
-                                                    <span className="font-semibold text-slate-800">{formatINR(activeReviewInvoice?.roundoffAmount)}</span>
+                                                    <input type="number" step="0.01" className="w-full bg-white border border-slate-200 rounded px-1 py-0.5 font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-amber-500 text-xs" value={activeReviewInvoice?.roundoffAmount || ''} onChange={(e) => handleInvoiceChange('roundoffAmount', safeNum(e.target.value))} />
                                                 </div>
                                             </div>
 
@@ -845,28 +975,32 @@
                                                 <div className="flex items-center gap-1.5 flex-wrap">
                                                     <span>Taxable ({formatINR(activeReviewInvoice?.taxableAmount)})</span>
                                                     <span>+</span>
-                                                    <span>Taxes ({formatINR((activeReviewInvoice?.taxBreakdown?.cgst || 0) + (activeReviewInvoice?.taxBreakdown?.sgst || 0) + (activeReviewInvoice?.taxBreakdown?.igst || 0))})</span>
+                                                    <span>Taxes ({formatINR(computedTotalTax)})</span>
                                                     <span>{activeReviewInvoice?.roundoffAmount >= 0 ? '+' : ''}</span>
                                                     <span>RoundOff ({formatINR(activeReviewInvoice?.roundoffAmount)})</span>
                                                 </div>
                                                 <div className="font-bold text-slate-900">
-                                                    = {formatINR(activeReviewInvoice?.totalAmount)}
+                                                    = {formatINR(computedNetTotal)}
                                                 </div>
                                             </div>
 
                                             <div className="bg-blue-50 border border-blue-200 text-slate-900 p-3 rounded-lg flex items-center justify-between font-mono">
                                                 <div>
                                                     <span className="text-[10px] text-slate-500 font-semibold uppercase tracking-wider block font-sans">Final Payable Total</span>
-                                                    <span className="text-base font-bold text-slate-900">{formatINR(activeReviewInvoice?.totalAmount)}</span>
+                                                    <input type="number" className="w-32 bg-white border border-blue-300 rounded px-2 py-1 text-base font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1" value={activeReviewInvoice?.totalAmount || ''} onChange={(e) => handleInvoiceChange('totalAmount', safeNum(e.target.value))} />
                                                 </div>
                                                 <div className="text-right font-sans">
-                                                    {activeReviewInvoice?.mathDifference === 0 ? (
-                                                        <span className="text-[11px] font-semibold text-emerald-700 flex items-center gap-1 bg-emerald-100/80 px-2.5 py-0.5 rounded-full border border-emerald-200/80">
+                                                    <button type="button" className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-1.5 rounded-lg text-xs font-semibold shadow-sm transition-colors flex items-center gap-1.5 mb-1 ml-auto">
+                                                        <span className="material-symbols-outlined text-[16px]">save</span>
+                                                        Save Changes
+                                                    </button>
+                                                    {computedNetTotal === safeNum(activeReviewInvoice?.totalAmount) ? (
+                                                        <span className="text-[11px] font-semibold text-emerald-700 flex items-center justify-end gap-1 px-1 mt-1">
                                                             <span className="material-symbols-outlined text-[14px]">check_circle</span> Math Verified
                                                         </span>
                                                     ) : (
-                                                        <span className="text-[11px] font-semibold text-rose-700 flex items-center gap-1 bg-rose-100/80 px-2.5 py-0.5 rounded-full border border-rose-200/80">
-                                                            <span className="material-symbols-outlined text-[14px]">warning</span> Diff: ₹{activeReviewInvoice?.mathDifference}
+                                                        <span className="text-[11px] font-bold text-rose-600 flex items-center justify-end gap-1 px-1 mt-1">
+                                                            <span className="material-symbols-outlined text-[14px]">warning</span> Math Mismatch: Expected {formatINR(computedNetTotal)}
                                                         </span>
                                                     )}
                                                 </div>
