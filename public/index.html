@@ -226,7 +226,7 @@
                     fileSize: (file.size / (1024 * 1024)).toFixed(2) + ' MB',
                     fileType: file.type.includes('pdf') || file.name.endsWith('.pdf') ? 'pdf' : 'image',
                     vendorName: 'Extracting Metadata...',
-                    gstin: 'Calling Gemini 2.5 Flash...',
+                    gstin: 'Calling Extraction Engine...',
                     invoiceNumber: 'Processing...',
                     invoiceDate: '',
                     taxableAmount: 0,
@@ -1456,7 +1456,7 @@
                                                     </div>
                                                     <p className="text-[11px] text-emerald-600 font-medium flex items-center gap-1">
                                                         <span className="material-symbols-outlined text-[13px]">check_circle</span>
-                                                        <span>Verified via Gemini AI Backend</span>
+                                                        <span>Verified via Extraction Engine</span>
                                                     </p>
                                                 </div>
                                                 <div className="w-8 h-8 rounded-lg bg-emerald-50 border border-emerald-100 flex items-center justify-center text-emerald-600">
