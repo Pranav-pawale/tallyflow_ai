@@ -6,6 +6,65 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 const path = require('path');
 const fs = require('fs');
 const { ClerkExpressRequireAuth } = require('@clerk/clerk-sdk-node');
+const sqlite3 = require('sqlite3').verbose();
+
+const db = new sqlite3.Database('./database.sqlite', (err) => {
+    if (err) {
+        console.error('❌ SQLite Connection Error:', err.message);
+    } else {
+        console.log('✅ SQLite Database Connected');
+    }
+});
+
+db.serialize(() => {
+    db.run(`CREATE TABLE IF NOT EXISTS invoices (
+        id TEXT PRIMARY KEY,
+        orgId TEXT,
+        userId TEXT,
+        fileName TEXT,
+        vendorName TEXT,
+        invoiceNumber TEXT,
+        totalAmount REAL,
+        verificationState TEXT,
+        fullData TEXT,
+        createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`, (err) => { if (err) console.error('Table init error (invoices):', err.message); });
+
+    db.run(`CREATE TABLE IF NOT EXISTS vendors (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        orgId TEXT,
+        rawVendorName TEXT,
+        tallyLedgerName TEXT,
+        gstin TEXT,
+        createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(orgId, rawVendorName)
+    )`, (err) => { if (err) console.error('Table init error (vendors):', err.message); });
+});
+
+// Safe vendor save helper
+function saveVendorMapping(orgId, rawVendorName, tallyLedgerName, gstin) {
+    const sql = `INSERT INTO vendors (orgId, rawVendorName, tallyLedgerName, gstin) 
+                 VALUES (?, ?, ?, ?) 
+                 ON CONFLICT(orgId, rawVendorName) 
+                 DO UPDATE SET tallyLedgerName = excluded.tallyLedgerName, gstin = excluded.gstin`;
+    db.run(sql, [orgId || 'default_org', rawVendorName, tallyLedgerName, gstin || ''], (err) => {
+        if (err) console.error('Error saving vendor mapping:', err.message);
+    });
+}
+
+function getMappedVendorLedger(orgId, rawVendorName) {
+    return new Promise((resolve) => {
+        if (!rawVendorName) return resolve(null);
+        const sql = `SELECT tallyLedgerName FROM vendors 
+                     WHERE (orgId = ? OR orgId IS NULL OR orgId = 'default_org') 
+                     AND LOWER(TRIM(rawVendorName)) = LOWER(TRIM(?)) 
+                     LIMIT 1`;
+        db.get(sql, [orgId || 'default_org', rawVendorName.trim()], (err, row) => {
+            if (err || !row) resolve(null);
+            else resolve(row.tallyLedgerName);
+        });
+    });
+}
 
 // Load environment variables from .env file
 dotenv.config({ path: path.join(__dirname, '.env'), override: true });
@@ -367,6 +426,17 @@ async function processFileWithGemini(genAI, filePath, mimeType) {
     throw new Error(`AI extraction failed: ${lastError ? lastError.message : 'Unknown error'}`);
 }
 
+// API ENDPOINT: POST /api/vendors
+app.post('/api/vendors', requireClerkAuth, (req, res) => {
+    const { rawVendorName, tallyLedgerName, gstin } = req.body;
+    const orgId = req.auth ? req.auth.orgId : 'default_org';
+    if (!rawVendorName || !tallyLedgerName) {
+        return res.status(400).json({ success: false, error: 'Missing required fields' });
+    }
+    saveVendorMapping(orgId, rawVendorName, tallyLedgerName, gstin);
+    res.json({ success: true });
+});
+
 // API ENDPOINT: POST /api/extract-invoice (Protected by Clerk Auth, Supports concurrent multi-file upload processing)
 app.post('/api/extract-invoice', requireClerkAuth, upload.any(), async (req, res) => {
     const uploadedFiles = req.files || [];
@@ -398,6 +468,8 @@ app.post('/api/extract-invoice', requireClerkAuth, upload.any(), async (req, res
                 try {
                     const extractedRaw = await processFileWithGemini(genAI, file.path, file.mimetype);
                     const audited = auditInvoiceData(extractedRaw);
+                    const savedLedger = await getMappedVendorLedger(orgId, audited.vendor_name);
+                    const finalLedgerName = savedLedger || (audited.vendor_name ? `${audited.vendor_name} Ledger` : 'Sundry Creditors');
                     const xml = generateTallyXml(audited);
 
                     return {
@@ -412,7 +484,7 @@ app.post('/api/extract-invoice', requireClerkAuth, upload.any(), async (req, res
                         vendorName: audited.vendor_name,
                         gstin: audited.gstin,
                         placeOfSupply: extractedRaw.place_of_supply || 'Maharashtra',
-                        tallyLedgerName: audited.vendor_name ? `${audited.vendor_name} Ledger` : 'Sundry Creditors',
+                        tallyLedgerName: finalLedgerName,
                         narration: extractedRaw.narration || `Purchase from ${audited.vendor_name || 'Vendor'} vide Invoice #${audited.invoice_number || ''}`,
                         hsnCode: extractedRaw.hsn_code || '998313',
                         quantity: extractedRaw.quantity || 1,
@@ -466,6 +538,22 @@ app.post('/api/extract-invoice', requireClerkAuth, upload.any(), async (req, res
             })
         );
 
+        try {
+            const stmt = db.prepare('INSERT OR REPLACE INTO invoices (id, orgId, userId, fileName, vendorName, invoiceNumber, totalAmount, verificationState, fullData) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
+            processedInvoices.forEach(inv => {
+                if (inv.id && !inv.id.endsWith('_err')) {
+                    stmt.run(inv.id, orgId, userId, inv.fileName, inv.vendorName, inv.invoiceNumber, inv.totalAmount, inv.verificationState, JSON.stringify(inv));
+                    if (inv.vendorName) {
+                        saveVendorMapping(orgId, inv.vendorName, inv.tallyLedgerName, inv.gstin);
+                    }
+                }
+            });
+            stmt.finalize();
+        } catch (dbErr) {
+            console.error('Database Insert Error:', dbErr.message);
+            return res.status(500).json({ success: false, error: dbErr.message });
+        }
+
         return res.status(200).json({
             success: true,
             message: `${processedInvoices.length} invoice(s) processed successfully`,
@@ -483,6 +571,29 @@ app.post('/api/extract-invoice', requireClerkAuth, upload.any(), async (req, res
             success: false,
             error: err.message || 'An unexpected error occurred during invoice processing.'
         });
+    }
+});
+
+app.get('/api/invoices', requireClerkAuth, (req, res) => {
+    try {
+        const orgId = req.auth ? req.auth.orgId : null;
+        db.all('SELECT * FROM invoices WHERE orgId = ? ORDER BY createdAt DESC', [orgId], (err, rows) => {
+            if (err) {
+                console.error('Database Error:', err.message);
+                return res.status(500).json({ success: false, error: 'Failed to fetch invoices.' });
+            }
+            const data = rows.map(row => {
+                try {
+                    return JSON.parse(row.fullData);
+                } catch (e) {
+                    return null;
+                }
+            }).filter(Boolean);
+            res.json({ success: true, data });
+        });
+    } catch (err) {
+        console.error('Database query exception:', err.message);
+        res.status(500).json({ success: false, error: err.message });
     }
 });
 
@@ -510,12 +621,8 @@ app.get('/api/health', (req, res) => {
 
 // Catch-all Multer or Express errors
 app.use((err, req, res, next) => {
-    if (err instanceof multer.MulterError) {
-        return res.status(400).json({ success: false, error: `Upload error: ${err.message}` });
-    } else if (err) {
-        return res.status(400).json({ success: false, error: err.message });
-    }
-    next();
+    console.error('⚠️ Server Exception Captured:', err.stack || err.message);
+    res.status(500).json({ success: false, error: err.message || 'Internal Server Error' });
 });
 
 // Start Server
