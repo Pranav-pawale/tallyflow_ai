@@ -1,21 +1,12 @@
 {
-  "name": "tallyflow-ai-backend",
-  "version": "1.0.0",
-  "description": "Secure Node.js backend middleware and web interface for TallyFlow AI invoice processing",
-  "main": "server.js",
-  "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js"
-  },
   "dependencies": {
-    "@clerk/clerk-react": "^5.61.10",
     "@clerk/clerk-sdk-node": "^4.13.23",
-    "@google/generative-ai": "^0.21.0",
-    "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
-    "express": "^4.19.2",
-    "express-rate-limit": "^8.7.0",
-    "multer": "^1.4.5-lts.1",
+    "@google/generative-ai": "^0.24.1",
+    "cors": "^2.8.6",
+    "dotenv": "^18.0.6",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.7.1",
+    "multer": "^2.4.0",
     "sqlite3": "^6.0.1"
   }
 }

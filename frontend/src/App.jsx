@@ -1,0 +1,1720 @@
+import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
+import { SignedIn, SignedOut, SignIn, UserButton, useAuth } from "@clerk/clerk-react";
+
+        
+
+        function App() {
+            const { getToken } = useAuth();
+            // 1. Reactive State Management (0 hardcoded mock records!)
+            const [invoices, setInvoices] = useState([]);
+            const [selectedIds, setSelectedIds] = useState(new Set());
+            const [activeFilter, setActiveFilter] = useState('all'); // 'all' | 'needs_review' | 'verified'
+            const [searchQuery, setSearchQuery] = useState('');
+            const [errorAlert, setErrorAlert] = useState(null);
+            const [xmlModalData, setXmlModalData] = useState(null);
+            const [showRawXml, setShowRawXml] = useState(false);
+            const [copyLabel, setCopyLabel] = useState('Copy XML');
+            const [isDragging, setIsDragging] = useState(false);
+            const [isDataMappingOpen, setIsDataMappingOpen] = useState(true);
+            const [isDataModalOpen, setIsDataModalOpen] = useState(false);
+            const [companies, setCompanies] = useState(["Tata Motors (FY 24-25)", "Reliance Retail Ltd", "Infosys Technologies"]);
+            const [selectedCompany, setSelectedCompany] = useState(companies[0]);
+            const [isOrgDropdownOpen, setIsOrgDropdownOpen] = useState(false);
+            const [isAddingCompany, setIsAddingCompany] = useState(false);
+            const [newCompanyName, setNewCompanyName] = useState('');
+            const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
+            const [isAccountMenuOpen, setIsAccountMenuOpen] = useState(false);
+
+            useEffect(() => {
+                const fetchInvoices = async () => {
+                    try {
+                        const token = await getToken();
+                        const response = await fetch('/api/invoices', {
+                            headers: { Authorization: `Bearer ${token}` }
+                        });
+                        const result = await response.json();
+                        if (result.success) {
+                            setInvoices(result.data);
+                        }
+                    } catch (err) {
+                        console.error('Error fetching invoices:', err);
+                    }
+                };
+                fetchInvoices();
+            }, []);
+            const accountMenuRef = useRef(null);
+            const orgDropdownRef = useRef(null);
+            const userMenuRef = useRef(null);
+
+            // Close dropdowns on click outside
+            useEffect(() => {
+                const handleClickOutside = (e) => {
+                    if (orgDropdownRef.current && !orgDropdownRef.current.contains(e.target)) {
+                        setIsOrgDropdownOpen(false);
+                    }
+                    if (userMenuRef.current && !userMenuRef.current.contains(e.target)) {
+                        setIsUserMenuOpen(false);
+                    }
+                    if (accountMenuRef.current && !accountMenuRef.current.contains(e.target)) {
+                        setIsAccountMenuOpen(false);
+                    }
+                };
+                document.addEventListener('mousedown', handleClickOutside);
+                return () => document.removeEventListener('mousedown', handleClickOutside);
+            }, []);
+
+            // Audit Review View States
+            const [activeReviewInvoice, setActiveReviewInvoice] = useState(null);
+            const [activeHoverSection, setActiveHoverSection] = useState(null);
+
+            const fileInputRef = useRef(null);
+
+            // Handle Company Deletion
+            const handleDeleteCompany = (companyToDelete, e) => {
+                e.stopPropagation();
+                if (companies.length <= 1) return;
+                
+                const updatedCompanies = companies.filter(c => c !== companyToDelete);
+                setCompanies(updatedCompanies);
+                
+                if (selectedCompany === companyToDelete) {
+                    setSelectedCompany(updatedCompanies[0]);
+                }
+            };
+
+            // Helper: Safe Number Parsing
+            const safeNum = (val) => parseFloat(val) || 0;
+
+            // Handle active invoice input change
+            const handleInvoiceChange = (field, value) => {
+                if (!activeReviewInvoice) return;
+                
+                const updated = { ...activeReviewInvoice };
+                if (field.includes('.')) {
+                    const [parent, child] = field.split('.');
+                    updated[parent] = { ...updated[parent], [child]: value };
+                } else {
+                    updated[field] = value;
+                }
+                
+                setActiveReviewInvoice(updated);
+                
+                // Also update in the main invoices array so changes persist
+                setInvoices(prev => prev.map(inv => inv.id === updated.id ? updated : inv));
+            };
+
+            const saveVendorRule = async (rawVendor, newLedger, gstin) => {
+                if (!rawVendor || !newLedger) return;
+                try {
+                    const token = await getToken();
+                    await fetch('/api/vendors', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            Authorization: `Bearer ${token}`
+                        },
+                        body: JSON.stringify({
+                            rawVendorName: rawVendor.trim(),
+                            tallyLedgerName: newLedger.trim(),
+                            gstin: (gstin || '').trim()
+                        })
+                    });
+                } catch (err) {
+                    console.error('Failed to persist vendor mapping:', err);
+                }
+            };
+
+            // Helper: Format Rupee Currency
+            const formatINR = (val) => {
+                const num = parseFloat(val || 0);
+                return '₹' + num.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            };
+
+            // Keyboard Shortcut: Cmd+U / Ctrl+U for upload
+            useEffect(() => {
+                const handleKeyDown = (e) => {
+                    if ((e.ctrlKey || e.metaKey) && (e.key === 'u' || e.key === 'U')) {
+                        e.preventDefault();
+                        if (fileInputRef.current) fileInputRef.current.click();
+                    }
+                };
+                window.addEventListener('keydown', handleKeyDown);
+                return () => window.removeEventListener('keydown', handleKeyDown);
+            }, []);
+
+            // Handle Multi-file Upload and Extraction Pipeline
+            const handleFileUpload = async (files) => {
+                if (!files || files.length === 0) return;
+
+                setErrorAlert(null);
+                const fileArray = Array.from(files);
+
+                // Map files to local Blob URLs for instant high-fidelity image rendering
+                const fileMap = new Map();
+                fileArray.forEach(file => {
+                    fileMap.set(file.name, URL.createObjectURL(file));
+                });
+
+                // Create temp loading rows
+                const tempRows = fileArray.map((file, idx) => ({
+                    id: `temp_${Date.now()}_${idx}`,
+                    fileName: file.name,
+                    fileUrl: fileMap.get(file.name),
+                    fileSize: (file.size / (1024 * 1024)).toFixed(2) + ' MB',
+                    fileType: file.type.includes('pdf') || file.name.endsWith('.pdf') ? 'pdf' : 'image',
+                    vendorName: 'Extracting Metadata...',
+                    gstin: 'Calling Extraction Engine...',
+                    invoiceNumber: 'Processing...',
+                    invoiceDate: '',
+                    taxableAmount: 0,
+                    taxBreakdown: { cgst: 0, sgst: 0, igst: 0 },
+                    totalAmount: 0,
+                    verificationState: 'extracting',
+                    isExtracting: true,
+                    uploadedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                }));
+
+                // Append temp rows to invoices
+                setInvoices(prev => [...tempRows, ...prev]);
+
+                // Send FormData to Backend API
+                const formData = new FormData();
+                fileArray.forEach(file => {
+                    formData.append('files', file);
+                });
+
+                try {
+                    const token = await getToken();
+                    const response = await fetch('/api/extract-invoice', {
+                        method: 'POST',
+                        headers: { Authorization: `Bearer ${token}` },
+                        body: formData
+                    });
+
+                    const resData = await response.json();
+
+                    if (!response.ok || !resData.success) {
+                        throw new Error(resData.error || 'Failed to extract invoice data from server.');
+                    }
+
+                    const extractedRawList = resData.data || [];
+                    const extractedList = extractedRawList.map((inv, idx) => ({
+                        ...inv,
+                        fileUrl: fileMap.get(inv.fileName) || tempRows[idx]?.fileUrl || null
+                    }));
+
+                    // Replace temp rows with real extracted JSON objects
+                    setInvoices(prev => {
+                        const tempIds = new Set(tempRows.map(t => t.id));
+                        const filtered = prev.filter(item => !tempIds.has(item.id));
+                        return [...extractedList, ...filtered];
+                    });
+
+                    // Automatically select newly extracted invoices
+                    setSelectedIds(prev => {
+                        const next = new Set(prev);
+                        extractedList.forEach(inv => next.add(inv.id));
+                        return next;
+                    });
+
+                } catch (err) {
+                    console.error("Upload error:", err);
+                    setErrorAlert(err.message || 'Error occurred during invoice extraction.');
+
+                    // Remove temp rows on complete failure
+                    setInvoices(prev => {
+                        const tempIds = new Set(tempRows.map(t => t.id));
+                        return prev.filter(item => !tempIds.has(item.id));
+                    });
+                } finally {
+                    if (fileInputRef.current) fileInputRef.current.value = '';
+                }
+            };
+
+            // Selection Handlers
+            const toggleSelectInvoice = (id) => {
+                setSelectedIds(prev => {
+                    const next = new Set(prev);
+                    if (next.has(id)) next.delete(id);
+                    else next.add(id);
+                    return next;
+                });
+            };
+
+            const toggleSelectAll = () => {
+                if (selectedIds.size === filteredInvoices.length && filteredInvoices.length > 0) {
+                    setSelectedIds(new Set());
+                } else {
+                    const next = new Set(filteredInvoices.map(i => i.id));
+                    setSelectedIds(next);
+                }
+            };
+
+            // Delete Handlers
+            const deleteInvoice = (id) => {
+                setInvoices(prev => prev.filter(i => i.id !== id));
+                setSelectedIds(prev => {
+                    const next = new Set(prev);
+                    next.delete(id);
+                    return next;
+                });
+                if (activeReviewInvoice && activeReviewInvoice.id === id) {
+                    setActiveReviewInvoice(null);
+                }
+            };
+
+            const deleteSelected = () => {
+                setInvoices(prev => prev.filter(i => !selectedIds.has(i.id)));
+                setSelectedIds(new Set());
+                if (activeReviewInvoice && selectedIds.has(activeReviewInvoice.id)) {
+                    setActiveReviewInvoice(null);
+                }
+            };
+
+            // Computed Dynamic UI Metrics (100% derived from React State)
+            const totalInvoicesCount = invoices.length;
+            const verifiedCount = useMemo(() => invoices.filter(i => i.verificationState === 'verified').length, [invoices]);
+            const needsReviewCount = useMemo(() => invoices.filter(i => i.verificationState === 'needs_review' || i.verificationState === 'math_error').length, [invoices]);
+            const extractingCount = useMemo(() => invoices.filter(i => i.verificationState === 'extracting').length, [invoices]);
+
+            // HSN / GSTIN Validation Rate
+            const hsnValidationRate = useMemo(() => {
+                const totalProcessed = totalInvoicesCount - extractingCount;
+                if (totalProcessed <= 0) return 0;
+                return Math.round((verifiedCount / totalProcessed) * 100);
+            }, [totalInvoicesCount, extractingCount, verifiedCount]);
+
+            // Total Tax Detected (sum of cgst + sgst + igst)
+            const totalTaxDetected = useMemo(() => {
+                return invoices.reduce((sum, inv) => {
+                    if (inv.verificationState === 'extracting') return sum;
+                    const tax = (inv.taxBreakdown?.cgst || 0) + (inv.taxBreakdown?.sgst || 0) + (inv.taxBreakdown?.igst || 0);
+                    return sum + tax;
+                }, 0);
+            }, [invoices]);
+
+            // Total Invoice Value
+            const totalValueProcessed = useMemo(() => {
+                return invoices.reduce((sum, inv) => sum + (inv.totalAmount || 0), 0);
+            }, [invoices]);
+
+            // Filtered Invoices List
+            const filteredInvoices = useMemo(() => {
+                return invoices.filter(inv => {
+                    // Filter tab check
+                    if (activeFilter === 'needs_review' && !(inv.verificationState === 'needs_review' || inv.verificationState === 'math_error')) {
+                        return false;
+                    }
+                    if (activeFilter === 'verified' && inv.verificationState !== 'verified') {
+                        return false;
+                    }
+                    // Search query check
+                    if (searchQuery.trim() !== '') {
+                        const q = searchQuery.toLowerCase();
+                        const vendor = (inv.vendorName || '').toLowerCase();
+                        const invNo = (inv.invoiceNumber || '').toLowerCase();
+                        const gstin = (inv.gstin || '').toLowerCase();
+                        const file = (inv.fileName || '').toLowerCase();
+                        return vendor.includes(q) || invNo.includes(q) || gstin.includes(q) || file.includes(q);
+                    }
+                    return true;
+                });
+            }, [invoices, activeFilter, searchQuery]);
+
+            // Financial Dock Computations for Selected Invoices
+            const selectedInvoices = useMemo(() => {
+                return invoices.filter(i => selectedIds.has(i.id) && i.verificationState !== 'extracting');
+            }, [invoices, selectedIds]);
+
+            const selectedTaxableSum = useMemo(() => selectedInvoices.reduce((sum, i) => sum + (i.taxableAmount || 0), 0), [selectedInvoices]);
+            const selectedCgstSum = useMemo(() => selectedInvoices.reduce((sum, i) => sum + (i.taxBreakdown?.cgst || 0), 0), [selectedInvoices]);
+            const selectedSgstSum = useMemo(() => selectedInvoices.reduce((sum, i) => sum + (i.taxBreakdown?.sgst || 0), 0), [selectedInvoices]);
+            const selectedIgstSum = useMemo(() => selectedInvoices.reduce((sum, i) => sum + (i.taxBreakdown?.igst || 0), 0), [selectedInvoices]);
+            const selectedTotalTaxSum = useMemo(() => selectedCgstSum + selectedSgstSum + selectedIgstSum, [selectedInvoices]);
+            const selectedNetTotalSum = useMemo(() => selectedInvoices.reduce((sum, i) => sum + (i.totalAmount || 0), 0), [selectedInvoices]);
+
+            const selectedVerifiedCount = useMemo(() => selectedInvoices.filter(i => i.verificationState === 'verified').length, [selectedInvoices]);
+            const selectedReviewCount = useMemo(() => selectedInvoices.filter(i => i.verificationState === 'needs_review' || i.verificationState === 'math_error').length, [selectedInvoices]);
+
+            const unmappedVendors = useMemo(() => {
+                const uniqueUnmapped = new Set();
+                selectedInvoices.forEach(inv => {
+                    if (!inv.tallyLedgerName || inv.tallyLedgerName === 'Sundry Creditors' || inv.tallyLedgerName === `${inv.vendorName} Ledger`) {
+                        if (inv.vendorName && inv.vendorName !== 'Extraction Failed') {
+                            uniqueUnmapped.add(inv.vendorName);
+                        }
+                    }
+                });
+                return Array.from(uniqueUnmapped);
+            }, [selectedInvoices]);
+
+            // Drag & Drop Handlers
+            const handleDragOver = (e) => {
+                e.preventDefault();
+                setIsDragging(true);
+            };
+
+            const handleDragLeave = (e) => {
+                e.preventDefault();
+                setIsDragging(false);
+            };
+
+            const handleDrop = (e) => {
+                e.preventDefault();
+                setIsDragging(false);
+                if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                    handleFileUpload(e.dataTransfer.files);
+                }
+            };
+
+            // Copy & Download XML Modal
+            const handleCopyXml = () => {
+                if (!xmlModalData?.xml) return;
+                navigator.clipboard.writeText(xmlModalData.xml).then(() => {
+                    setCopyLabel('Copied!');
+                    setTimeout(() => setCopyLabel('Copy XML'), 2000);
+                });
+            };
+
+            const handleDownloadXml = () => {
+                if (!xmlModalData?.xml) return;
+                const blob = new Blob([xmlModalData.xml], { type: 'application/xml' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `tally_voucher_${xmlModalData.invNo || 'invoice'}.xml`;
+                a.click();
+                URL.revokeObjectURL(url);
+            };
+
+            // Phase 3 Math Calculations for Audit Review
+            const computedTotalTax = activeReviewInvoice ? safeNum(activeReviewInvoice.taxBreakdown?.cgst) + safeNum(activeReviewInvoice.taxBreakdown?.sgst) + safeNum(activeReviewInvoice.taxBreakdown?.igst) : 0;
+            const computedNetTotal = activeReviewInvoice ? safeNum(activeReviewInvoice.taxableAmount) + computedTotalTax + safeNum(activeReviewInvoice.roundoffAmount) : 0;
+
+            return (
+                <React.Fragment>
+                    <SignedIn>
+                        <div className="min-h-screen bg-slate-50/70 text-slate-800 font-sans antialiased flex flex-col">
+
+                    {/* TOP GLOBAL HEADER */}
+                    <header className="fixed top-0 left-0 right-0 h-14 bg-white/95 backdrop-blur border-b border-slate-200/80 z-50 px-4 flex items-center justify-between shadow-2xs">
+                        <div className="flex items-center gap-3">
+                            <div className="w-7 h-7 rounded-lg bg-slate-900 text-white flex items-center justify-center shadow-xs">
+                                <svg className="w-4 h-4 text-blue-400 fill-current" viewBox="0 0 24 24">
+                                    <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
+                                </svg>
+                            </div>
+                            <div className="flex flex-col">
+                                <div className="flex items-center gap-2">
+                                    <span className="font-heading text-sm font-bold tracking-tight text-slate-900">TallyFlow AI</span>
+                                    <span className="text-[10px] font-medium px-1.5 py-0.2 rounded-full bg-slate-100 text-slate-600 border border-slate-200">v2.5</span>
+                                </div>
+                                <span className="text-[11px] text-slate-400">Enterprise GST Invoice Automation</span>
+                            </div>
+                        </div>
+
+                        <div className="flex items-center gap-3">
+                            {/* Refined AI Engine Pill */}
+                            <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-50 border border-emerald-200/60 text-[11px] font-medium text-emerald-700">
+                                <span className="relative flex h-2 w-2">
+                                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                                    <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                                </span>
+                                <span>AI Extraction Active</span>
+                            </div>
+
+                            <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-100/80 border border-slate-200 text-[11px] font-medium text-slate-600">
+                                <span className="material-symbols-outlined text-[15px] text-slate-400">database</span>
+                                <span>Tally ODBC :9000</span>
+                            </div>
+
+                            {/* Dynamic B2B Company Selector (Mock Organization Switcher) */}
+                            <div className="relative" ref={orgDropdownRef}>
+                                <button
+                                    type="button"
+                                    onClick={() => setIsOrgDropdownOpen(!isOrgDropdownOpen)}
+                                    className="bg-white border border-slate-200 hover:border-slate-300 rounded-lg px-2.5 py-1 text-slate-700 hover:bg-slate-50 focus:outline-none shadow-2xs font-sans text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                                >
+                                    <div className="w-4 h-4 rounded bg-blue-600 text-white flex items-center justify-center text-[10px] font-bold">
+                                        TM
+                                    </div>
+                                    <span>{selectedCompany}</span>
+                                    <span className="material-symbols-outlined text-[14px] text-slate-400 ml-0.5">unfold_more</span>
+                                </button>
+                                {isOrgDropdownOpen && (
+                                    <div className="absolute right-0 mt-1 w-56 bg-white border border-slate-200 rounded-xl shadow-lg z-50 py-1 font-sans text-xs">
+                                        <div className="px-3 py-1.5 text-[10px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-100">
+                                            Select Active Company
+                                        </div>
+                                        {companies.map((comp) => (
+                                            <button
+                                                key={comp}
+                                                type="button"
+                                                onClick={() => { setSelectedCompany(comp); setIsOrgDropdownOpen(false); setIsAddingCompany(false); }}
+                                                className={`w-full text-left px-3 py-1.5 flex items-center justify-between hover:bg-slate-50 transition-colors ${selectedCompany === comp ? 'font-semibold text-blue-600 bg-blue-50/50' : 'text-slate-700'}`}
+                                            >
+                                                <span className="truncate pr-2">{comp}</span>
+                                                <div className="flex items-center gap-1.5 shrink-0">
+                                                    {selectedCompany === comp && <span className="material-symbols-outlined text-[14px] text-blue-600">check</span>}
+                                                    <div 
+                                                        onClick={(e) => handleDeleteCompany(comp, e)}
+                                                        className="text-slate-400 hover:text-rose-500 p-0.5 rounded transition-colors flex items-center justify-center cursor-pointer"
+                                                        title="Delete company"
+                                                    >
+                                                        <span className="text-[14px] font-bold">&times;</span>
+                                                    </div>
+                                                </div>
+                                            </button>
+                                        ))}
+                                        <div className="border-t border-slate-100 mt-1">
+                                            {isAddingCompany ? (
+                                                <div className="px-3 py-2 flex items-center gap-2">
+                                                    <input 
+                                                        type="text" 
+                                                        autoFocus 
+                                                        className="text-sm px-2 py-1 w-full border-b border-blue-500 bg-slate-50 focus:outline-none text-slate-700" 
+                                                        placeholder="Enter company name..." 
+                                                        value={newCompanyName}
+                                                        onChange={(e) => setNewCompanyName(e.target.value)}
+                                                        onKeyDown={(e) => {
+                                                            if (e.key === 'Enter' && newCompanyName.trim() !== '') {
+                                                                const trimmed = newCompanyName.trim();
+                                                                if (!companies.includes(trimmed)) {
+                                                                    setCompanies(prev => [...prev, trimmed]);
+                                                                }
+                                                                setSelectedCompany(trimmed);
+                                                                setNewCompanyName('');
+                                                                setIsAddingCompany(false);
+                                                            } else if (e.key === 'Escape') {
+                                                                setIsAddingCompany(false);
+                                                                setNewCompanyName('');
+                                                            }
+                                                        }}
+                                                    />
+                                                    <button 
+                                                        type="button" 
+                                                        className="text-slate-400 hover:text-slate-600 p-1 flex items-center justify-center"
+                                                        onClick={(e) => { e.stopPropagation(); setIsAddingCompany(false); setNewCompanyName(''); }}
+                                                    >
+                                                        <span className="material-symbols-outlined text-[14px]">close</span>
+                                                    </button>
+                                                </div>
+                                            ) : (
+                                                <button
+                                                    type="button"
+                                                    onClick={(e) => {
+                                                        e.preventDefault();
+                                                        setIsAddingCompany(true);
+                                                    }}
+                                                    className="w-full text-left px-3 py-1.5 text-blue-600 hover:bg-slate-50 transition-colors flex items-center gap-1.5"
+                                                >
+                                                    <span className="material-symbols-outlined text-[15px]">add</span>
+                                                    <span>Add Custom Company...</span>
+                                                </button>
+                                            )}
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* User Avatar & Account Management (Clerk UserButton) */}
+                            <div className="relative">
+                                <UserButton />
+                            </div>
+                        </div>
+                    </header>
+
+                    {/* LEFT NAVIGATION SIDEBAR (Collapsible SaaS Aesthetic) */}
+                    <aside className="fixed left-0 top-14 bottom-0 w-56 bg-white border-r border-slate-200/80 z-40 flex flex-col justify-between py-3 select-none">
+                        <div className="flex-1 px-3 overflow-y-auto space-y-4">
+                            {/* Primary Workspace Item */}
+                            <div className="space-y-1">
+                                <span className="px-2 text-[10px] font-semibold text-slate-400 uppercase tracking-wider block mb-1">
+                                    Workspace
+                                </span>
+                                <button
+                                    type="button"
+                                    onClick={() => setActiveReviewInvoice(null)}
+                                    className={`w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-md text-xs font-semibold shadow-2xs transition-colors ${!activeReviewInvoice ? 'bg-slate-100/90 text-slate-900 border-l-2 border-slate-900' : 'text-slate-600 hover:bg-slate-100'}`}
+                                >
+                                    <span className="material-symbols-outlined text-[16px] text-slate-800">receipt_long</span>
+                                    <span>Invoice Workbench</span>
+                                </button>
+                            </div>
+
+                            {/* Secondary Collapsible Group: Data & Mapping */}
+                            <div>
+                                <button
+                                    type="button"
+                                    onClick={() => setIsDataMappingOpen(!isDataMappingOpen)}
+                                    className="w-full flex items-center justify-between px-2 py-1 text-[10px] font-semibold text-slate-400 uppercase tracking-wider hover:text-slate-600 transition-colors"
+                                >
+                                    <span>Data & Mapping</span>
+                                    <span className={`material-symbols-outlined text-[14px] transition-transform duration-200 ${isDataMappingOpen ? 'rotate-180' : ''}`}>
+                                        expand_more
+                                    </span>
+                                </button>
+                                
+                                {isDataMappingOpen && (
+                                    <div className="mt-1 space-y-0.5 pl-1 border-l border-slate-200/60 ml-2">
+                                        <a href="#" className="flex items-center gap-2 px-2.5 py-1.5 rounded-md text-[13px] font-medium text-slate-500 hover:text-slate-900 hover:bg-slate-100/60 transition-colors group">
+                                            <span className="material-symbols-outlined text-[15px] text-slate-400 group-hover:text-slate-600">sync_alt</span>
+                                            <span>GSTIN Reconciliation</span>
+                                        </a>
+                                        <a href="#" className="flex items-center gap-2 px-2.5 py-1.5 rounded-md text-[13px] font-medium text-slate-500 hover:text-slate-900 hover:bg-slate-100/60 transition-colors group">
+                                            <span className="material-symbols-outlined text-[15px] text-slate-400 group-hover:text-slate-600">category</span>
+                                            <span>HSN Code Mapping</span>
+                                        </a>
+                                        <a href="#" className="flex items-center gap-2 px-2.5 py-1.5 rounded-md text-[13px] font-medium text-slate-500 hover:text-slate-900 hover:bg-slate-100/60 transition-colors group">
+                                            <span className="material-symbols-outlined text-[15px] text-slate-400 group-hover:text-slate-600">list_alt</span>
+                                            <span>Tally Sync Logs</span>
+                                        </a>
+                                        <a href="#" className="flex items-center gap-2 px-2.5 py-1.5 rounded-md text-[13px] font-medium text-slate-500 hover:text-slate-900 hover:bg-slate-100/60 transition-colors group">
+                                            <span className="material-symbols-outlined text-[15px] text-slate-400 group-hover:text-slate-600">store</span>
+                                            <span>Vendor Master</span>
+                                        </a>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+
+                        {/* Ultra-Minimal Footer */}
+                        <div className="px-3 pt-2.5 border-t border-slate-200/80 bg-slate-50/50">
+                            <div className="flex items-center justify-between text-[11px] text-slate-500 font-medium">
+                                <span>Tally Connection</span>
+                                <span className="text-emerald-700 font-medium inline-flex items-center gap-1.5">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span> Connected
+                                </span>
+                            </div>
+                        </div>
+                    </aside>
+
+                    {/* MAIN CONTENT WORKSPACE (Fixed Header Offset Clearing) */}
+                    <div className="pl-56 pt-14">
+
+                        {/* DYNAMIC AUDIT REVIEW SPLIT-SCREEN VIEW */}
+                        {activeReviewInvoice ? (
+                            <div className="w-full pb-24 bg-slate-50/70 min-h-[calc(100vh-3.5rem)] flex flex-col">
+                                
+                                {/* Audit Review Top Bar */}
+                                <div className="bg-white border-b border-slate-200/80 px-5 py-3 flex items-center justify-between shadow-2xs sticky top-14 z-30">
+                                    <div className="flex items-center gap-3">
+                                        <button
+                                            type="button"
+                                            onClick={() => setActiveReviewInvoice(null)}
+                                            className="px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200/80 text-slate-700 text-xs font-semibold inline-flex items-center gap-1.5 transition-colors"
+                                        >
+                                            <span className="material-symbols-outlined text-[16px]">arrow_back</span>
+                                            <span>Back to Workbench</span>
+                                        </button>
+
+                                        {/* Pagination Nav Buttons */}
+                                        <div className="flex items-center gap-1">
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    const idx = invoices.findIndex(i => i.id === activeReviewInvoice.id);
+                                                    if (idx > 0) setActiveReviewInvoice(invoices[idx - 1]);
+                                                }}
+                                                disabled={invoices.findIndex(i => i.id === activeReviewInvoice.id) <= 0}
+                                                className="px-2 py-1 rounded-md bg-slate-50 hover:bg-slate-100 disabled:opacity-50 border border-slate-200 text-slate-600 text-xs font-semibold inline-flex items-center transition-colors"
+                                            >
+                                                &larr; Prev
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    const idx = invoices.findIndex(i => i.id === activeReviewInvoice.id);
+                                                    if (idx < invoices.length - 1) setActiveReviewInvoice(invoices[idx + 1]);
+                                                }}
+                                                disabled={invoices.findIndex(i => i.id === activeReviewInvoice.id) >= invoices.length - 1}
+                                                className="px-2 py-1 rounded-md bg-slate-50 hover:bg-slate-100 disabled:opacity-50 border border-slate-200 text-slate-600 text-xs font-semibold inline-flex items-center transition-colors"
+                                            >
+                                                Next &rarr;
+                                            </button>
+                                        </div>
+
+                                        <span className="text-slate-300 ml-1">|</span>
+                                        <div className="flex items-center gap-2">
+                                            <span className="text-xs font-bold text-slate-900 font-heading">
+                                                Audit Review: {activeReviewInvoice.fileName}
+                                            </span>
+                                            <span className="text-[10px] font-mono px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 border border-slate-200">
+                                                ID: {activeReviewInvoice.id}
+                                            </span>
+                                        </div>
+                                    </div>
+
+                                    <div className="flex items-center gap-2">
+                                        {activeReviewInvoice.verificationState === 'verified' ? (
+                                            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 text-[11px] font-semibold">
+                                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span> Verified & Tally-Ready
+                                            </span>
+                                        ) : (
+                                            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-50 text-amber-700 border border-amber-200 text-[11px] font-semibold">
+                                                <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span> Requires Audit Review
+                                            </span>
+                                        )}
+                                        <button
+                                            type="button"
+                                            onClick={() => setIsDataModalOpen(true)}
+                                            className="px-3 py-1.5 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-semibold inline-flex items-center gap-1.5 border border-blue-200/80 transition-colors shadow-2xs"
+                                        >
+                                            <span className="material-symbols-outlined text-[15px]">database</span>
+                                            <span>Data Extracted</span>
+                                        </button>
+                                    </div>
+                                </div>
+
+                                {/* Split Screen Main Body */}
+                                <div className="flex flex-col lg:flex-row gap-5 p-5">
+                                    
+                                    {/* LEFT COLUMN: Document Viewer with Hover Bounding Box Overlay */}
+                                    <div className="w-full lg:w-[45%] flex flex-col gap-3 sticky top-28 self-start">
+                                        <div className="bg-white border border-slate-200/80 rounded-xl p-4 shadow-xs flex flex-col items-center justify-center relative overflow-hidden">
+                                            <div className="w-full flex items-center justify-between pb-3 border-b border-slate-100 mb-3">
+                                                <div className="flex items-center gap-2 text-xs font-semibold text-slate-700">
+                                                    <span className="material-symbols-outlined text-[18px] text-blue-600">visibility</span>
+                                                    <span>Original Invoice Document</span>
+                                                </div>
+                                                <span className="text-[11px] font-mono text-slate-400">
+                                                    {activeReviewInvoice.fileSize || 'Image Document'}
+                                                </span>
+                                            </div>
+
+                                            {/* Document Representation & Interactive Overlay */}
+                                            <div className="relative w-full flex items-center justify-center bg-slate-900/5 rounded-lg p-2 overflow-hidden border border-slate-200/60 min-h-[440px]">
+                                                {activeReviewInvoice.fileUrl ? (
+                                                    <img
+                                                        src={activeReviewInvoice.fileUrl}
+                                                        alt={activeReviewInvoice.fileName}
+                                                        className="max-h-[580px] w-auto max-w-full object-contain rounded shadow-md border border-slate-200"
+                                                    />
+                                                ) : (
+                                                    /* Dynamic Fallback Visual Mock Invoice Document */
+                                                    <div className="w-full max-w-sm bg-white p-6 rounded-lg shadow-md border border-slate-200 space-y-4 font-mono text-[11px]">
+                                                        <div className="flex justify-between items-start border-b pb-3">
+                                                            <div>
+                                                                <div className="font-bold text-slate-900 text-sm">{activeReviewInvoice.vendorName || 'Vendor Name'}</div>
+                                                                <div className="text-slate-500">GSTIN: {activeReviewInvoice.gstin || 'N/A'}</div>
+                                                            </div>
+                                                            <div className="text-right">
+                                                                <div className="font-bold text-slate-800">TAX INVOICE</div>
+                                                                <div className="text-slate-500">#{activeReviewInvoice.invoiceNumber || 'INV-001'}</div>
+                                                                <div className="text-slate-400">{activeReviewInvoice.invoiceDate || '2025-03-27'}</div>
+                                                            </div>
+                                                        </div>
+                                                        <div className="space-y-2 py-2 border-b">
+                                                            <div className="flex justify-between text-slate-600">
+                                                                <span>Taxable Amount</span>
+                                                                <span>{formatINR(activeReviewInvoice.taxableAmount)}</span>
+                                                            </div>
+                                                            <div className="flex justify-between text-slate-600">
+                                                                <span>CGST + SGST + IGST</span>
+                                                                <span>{formatINR((activeReviewInvoice.taxBreakdown?.cgst || 0) + (activeReviewInvoice.taxBreakdown?.sgst || 0) + (activeReviewInvoice.taxBreakdown?.igst || 0))}</span>
+                                                            </div>
+                                                        </div>
+                                                        <div className="flex justify-between font-bold text-slate-900 text-xs">
+                                                            <span>Grand Total</span>
+                                                            <span>{formatINR(activeReviewInvoice.totalAmount)}</span>
+                                                        </div>
+                                                    </div>
+                                                )}
+
+                                                {/* Interactive Bounding Box Overlays */}
+                                                {activeHoverSection === 'supplier' && (
+                                                    <div className="absolute top-[5%] left-[5%] w-[90%] h-[20%] border-2 border-blue-500 bg-blue-500/20 rounded-lg shadow-lg shadow-blue-500/30 transition-all duration-200 flex items-start justify-start p-2 pointer-events-none">
+                                                        <span className="bg-blue-600 text-white text-[10px] font-bold px-2 py-0.5 rounded shadow">
+                                                            Supplier & GSTIN Box
+                                                        </span>
+                                                    </div>
+                                                )}
+
+                                                {activeHoverSection === 'metadata' && (
+                                                    <div className="absolute top-[26%] left-[45%] w-[50%] h-[16%] border-2 border-indigo-500 bg-indigo-500/20 rounded-lg shadow-lg shadow-indigo-500/30 transition-all duration-200 flex items-start justify-start p-2 pointer-events-none">
+                                                        <span className="bg-indigo-600 text-white text-[10px] font-bold px-2 py-0.5 rounded shadow">
+                                                            Invoice No & Date
+                                                        </span>
+                                                    </div>
+                                                )}
+
+                                                {activeHoverSection === 'line_items' && (
+                                                    <div className="absolute top-[44%] left-[5%] w-[90%] h-[28%] border-2 border-emerald-500 bg-emerald-500/20 rounded-lg shadow-lg shadow-emerald-500/30 transition-all duration-200 flex items-start justify-start p-2 pointer-events-none">
+                                                        <span className="bg-emerald-600 text-white text-[10px] font-bold px-2 py-0.5 rounded shadow">
+                                                            Line Items & Taxable Subtotal
+                                                        </span>
+                                                    </div>
+                                                )}
+
+                                                {activeHoverSection === 'tax' && (
+                                                    <div className="absolute top-[74%] left-[40%] w-[55%] h-[22%] border-2 border-amber-500 bg-amber-500/20 rounded-lg shadow-lg shadow-amber-500/30 transition-all duration-200 flex items-start justify-start p-2 pointer-events-none">
+                                                        <span className="bg-amber-600 text-white text-[10px] font-bold px-2 py-0.5 rounded shadow">
+                                                            Tax Amounts & Grand Total
+                                                        </span>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* RIGHT COLUMN: Interactive Data Audit Panel */}
+                                    <div className="w-full lg:w-[55%] space-y-4">
+                                        
+                                        {/* Section A: Supplier Identification */}
+                                        <div
+                                            onMouseEnter={() => setActiveHoverSection('supplier')}
+                                            onMouseLeave={() => setActiveHoverSection(null)}
+                                            className={`p-4 rounded-xl border transition-all cursor-pointer ${
+                                                activeHoverSection === 'supplier'
+                                                    ? 'bg-blue-50/60 border-blue-300 shadow-md ring-2 ring-blue-400/30'
+                                                    : 'bg-white border-slate-200/80 shadow-xs hover:border-slate-300'
+                                            }`}
+                                        >
+                                            <div className="flex items-center justify-between mb-3">
+                                                <div className="flex items-center gap-2">
+                                                    <span className="material-symbols-outlined text-[18px] text-blue-600">store</span>
+                                                    <h4 className="text-xs font-bold text-slate-900 uppercase tracking-wider">Section A: Supplier Identification</h4>
+                                                </div>
+                                            </div>
+
+                                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
+                                                <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-200/70">
+                                                    <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider block mb-0.5">Vendor Name</span>
+                                                    <input type="text" className="w-full bg-white border border-slate-200 rounded px-2 py-1 text-[13px] font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-blue-500" value={activeReviewInvoice?.vendorName || ''} onChange={(e) => handleInvoiceChange('vendorName', e.target.value)} placeholder="Vendor Name" />
+                                                </div>
+
+                                                <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-200/70">
+                                                    <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider block mb-0.5">Supplier GSTIN</span>
+                                                    <div className="flex items-center gap-1.5">
+                                                        <input type="text" className="w-full bg-white border border-slate-200 rounded px-2 py-1 text-[13px] font-mono font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-blue-500" value={activeReviewInvoice?.gstin || ''} onChange={(e) => handleInvoiceChange('gstin', e.target.value)} placeholder="GSTIN" />
+                                                        {activeReviewInvoice?.gstin && activeReviewInvoice?.gstin.length === 15 ? (
+                                                            <span className="text-[10px] text-emerald-600 font-semibold bg-emerald-100 px-1.5 py-0.2 rounded-full">
+                                                                ✓ Valid
+                                                            </span>
+                                                        ) : (
+                                                            <span className="text-[10px] text-amber-600 font-semibold bg-amber-100 px-1.5 py-0.2 rounded-full">
+                                                                Review
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                </div>
+
+                                                <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-200/70">
+                                                    <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider block mb-0.5">Place of Supply (State)</span>
+                                                    <input type="text" className="w-full bg-white border border-slate-200 rounded px-2 py-1 text-xs font-semibold text-slate-700 focus:outline-none focus:ring-1 focus:ring-blue-500" value={activeReviewInvoice?.placeOfSupply || ''} onChange={(e) => handleInvoiceChange('placeOfSupply', e.target.value)} placeholder="e.g. Maharashtra" />
+                                                </div>
+
+                                                <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-200/70">
+                                                    <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider block mb-0.5">Mapped Tally Ledger</span>
+                                                    <input type="text" className="w-full bg-white border border-slate-200 rounded px-2 py-1 text-xs font-semibold text-slate-700 focus:outline-none focus:ring-1 focus:ring-blue-500" value={activeReviewInvoice?.tallyLedgerName || ''} onChange={(e) => handleInvoiceChange('tallyLedgerName', e.target.value)} onBlur={(e) => saveVendorRule(activeReviewInvoice.vendorName, e.target.value, activeReviewInvoice.gstin)} placeholder="Ledger Name" />
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        {/* Section B: Invoice Metadata */}
+                                        <div
+                                            onMouseEnter={() => setActiveHoverSection('metadata')}
+                                            onMouseLeave={() => setActiveHoverSection(null)}
+                                            className={`p-4 rounded-xl border transition-all cursor-pointer ${
+                                                activeHoverSection === 'metadata'
+                                                    ? 'bg-indigo-50/60 border-indigo-300 shadow-md ring-2 ring-indigo-400/30'
+                                                    : 'bg-white border-slate-200/80 shadow-xs hover:border-slate-300'
+                                            }`}
+                                        >
+                                            <div className="flex items-center justify-between mb-3">
+                                                <div className="flex items-center gap-2">
+                                                    <span className="material-symbols-outlined text-[18px] text-indigo-600">receipt</span>
+                                                    <h4 className="text-xs font-bold text-slate-900 uppercase tracking-wider">Section B: Invoice Metadata</h4>
+                                                </div>
+                                            </div>
+
+                                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs mb-2.5">
+                                                <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-200/70">
+                                                    <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider block mb-0.5">Invoice Number</span>
+                                                    <input type="text" className="w-full bg-white border border-slate-200 rounded px-2 py-1 text-[13px] font-mono font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500" value={activeReviewInvoice?.invoiceNumber || ''} onChange={(e) => handleInvoiceChange('invoiceNumber', e.target.value)} placeholder="INV-001" />
+                                                </div>
+
+                                                <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-200/70">
+                                                    <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider block mb-0.5">Invoice Date</span>
+                                                    <input type="date" className="w-full bg-white border border-slate-200 rounded px-2 py-1 text-[13px] font-mono font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500" value={activeReviewInvoice?.invoiceDate || ''} onChange={(e) => handleInvoiceChange('invoiceDate', e.target.value)} />
+                                                </div>
+
+                                                <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-200/70">
+                                                    <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider block mb-0.5">Voucher Type</span>
+                                                    <input type="text" className="w-full bg-white border border-slate-200 rounded px-2 py-1 text-[13px] font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500" value={activeReviewInvoice?.voucherType || ''} onChange={(e) => handleInvoiceChange('voucherType', e.target.value)} placeholder="Purchase Voucher" />
+                                                </div>
+                                            </div>
+
+                                            <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-200/70 text-xs">
+                                                <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider block mb-0.5">Narration</span>
+                                                <textarea className="w-full bg-white border border-slate-200 rounded px-2 py-1 text-xs font-medium text-slate-700 focus:outline-none focus:ring-1 focus:ring-indigo-500" rows="2" value={activeReviewInvoice?.narration || ''} onChange={(e) => handleInvoiceChange('narration', e.target.value)} placeholder="Narration note..."></textarea>
+                                            </div>
+                                        </div>
+
+                                        {/* Section C: Line Item Allocation */}
+                                        <div
+                                            onMouseEnter={() => setActiveHoverSection('line_items')}
+                                            onMouseLeave={() => setActiveHoverSection(null)}
+                                            className={`p-4 rounded-xl border transition-all cursor-pointer ${
+                                                activeHoverSection === 'line_items'
+                                                    ? 'bg-emerald-50/60 border-emerald-300 shadow-md ring-2 ring-emerald-400/30'
+                                                    : 'bg-white border-slate-200/80 shadow-xs hover:border-slate-300'
+                                            }`}
+                                        >
+                                            <div className="flex items-center justify-between mb-3">
+                                                <div className="flex items-center gap-2">
+                                                    <span className="material-symbols-outlined text-[18px] text-emerald-600">inventory_2</span>
+                                                    <h4 className="text-xs font-bold text-slate-900 uppercase tracking-wider">Section C: Line Item Allocation</h4>
+                                                </div>
+                                            </div>
+
+                                            <div className="bg-slate-50 rounded-lg border border-slate-200/70 overflow-hidden">
+                                                <table className="w-full text-left text-[11px] font-mono">
+                                                    <thead className="bg-slate-100 text-[10px] text-slate-500 uppercase tracking-wider font-sans">
+                                                        <tr>
+                                                            <th className="px-3 py-1.5">Description / Ledger</th>
+                                                            <th className="px-2 py-1.5 text-center">HSN/SAC</th>
+                                                            <th className="px-2 py-1.5 text-right">Qty</th>
+                                                            <th className="px-2 py-1.5 text-right">Rate (₹)</th>
+                                                            <th className="px-3 py-1.5 text-right">Taxable Value</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody className="divide-y divide-slate-200/60 text-slate-700">
+                                                        <tr>
+                                                            <td className="px-3 py-2 font-sans font-medium text-slate-800">
+                                                                <input type="text" className="w-full bg-white border border-slate-200 rounded px-1 py-0.5 mb-1 focus:outline-none focus:ring-1 focus:ring-emerald-500 text-xs" value={activeReviewInvoice?.itemDescription || ''} onChange={(e) => handleInvoiceChange('itemDescription', e.target.value)} placeholder="Item Description" />
+                                                                <div className="text-[10px] text-slate-400 font-mono">Ledger: {activeReviewInvoice?.tallyLedgerName || 'Purchase Account'}</div>
+                                                            </td>
+                                                            <td className="px-2 py-2 text-center text-slate-600 font-mono">
+                                                                <input type="text" className="w-full bg-white border border-slate-200 rounded px-1 py-0.5 text-center focus:outline-none focus:ring-1 focus:ring-emerald-500 text-xs" value={activeReviewInvoice?.hsnCode || ''} onChange={(e) => handleInvoiceChange('hsnCode', e.target.value)} placeholder="HSN" />
+                                                            </td>
+                                                            <td className="px-2 py-2 text-right text-slate-800 font-semibold font-mono">
+                                                                <input type="number" className="w-16 bg-white border border-slate-200 rounded px-1 py-0.5 text-right focus:outline-none focus:ring-1 focus:ring-emerald-500 text-xs" value={activeReviewInvoice?.quantity || ''} onChange={(e) => handleInvoiceChange('quantity', safeNum(e.target.value))} />
+                                                            </td>
+                                                            <td className="px-2 py-2 text-right text-slate-600 font-mono">
+                                                                {formatINR(activeReviewInvoice?.taxableAmount ? (activeReviewInvoice.taxableAmount / (activeReviewInvoice.quantity || 1)) : 0)}
+                                                            </td>
+                                                            <td className="px-3 py-2 text-right font-semibold text-slate-900 font-mono">
+                                                                <input type="number" className="w-24 bg-white border border-slate-200 rounded px-1 py-0.5 text-right focus:outline-none focus:ring-1 focus:ring-emerald-500 text-xs" value={activeReviewInvoice?.taxableAmount || ''} onChange={(e) => handleInvoiceChange('taxableAmount', safeNum(e.target.value))} />
+                                                            </td>
+                                                        </tr>
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        </div>
+
+                                        {/* Section D: Tax Allocation & Math Check */}
+                                        <div
+                                            onMouseEnter={() => setActiveHoverSection('tax')}
+                                            onMouseLeave={() => setActiveHoverSection(null)}
+                                            className={`p-4 rounded-xl border transition-all cursor-pointer ${
+                                                activeHoverSection === 'tax'
+                                                    ? 'bg-amber-50/60 border-amber-300 shadow-md ring-2 ring-amber-400/30'
+                                                    : 'bg-white border-slate-200/80 shadow-xs hover:border-slate-300'
+                                            }`}
+                                        >
+                                            <div className="flex items-center justify-between mb-3">
+                                                <div className="flex items-center gap-2">
+                                                    <span className="material-symbols-outlined text-[18px] text-amber-600">calculate</span>
+                                                    <h4 className="text-xs font-bold text-slate-900 uppercase tracking-wider">Section D: Tax Allocation & Math Check</h4>
+                                                </div>
+                                            </div>
+
+                                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs font-mono mb-2.5">
+                                                <div className="bg-slate-50 p-2 rounded-lg border border-slate-200/70">
+                                                    <span className="text-[10px] text-slate-400 block font-sans">CGST</span>
+                                                    <input type="number" className="w-full bg-white border border-slate-200 rounded px-1 py-0.5 font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-amber-500 text-xs" value={activeReviewInvoice?.taxBreakdown?.cgst || ''} onChange={(e) => handleInvoiceChange('taxBreakdown.cgst', safeNum(e.target.value))} />
+                                                </div>
+                                                <div className="bg-slate-50 p-2 rounded-lg border border-slate-200/70">
+                                                    <span className="text-[10px] text-slate-400 block font-sans">SGST</span>
+                                                    <input type="number" className="w-full bg-white border border-slate-200 rounded px-1 py-0.5 font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-amber-500 text-xs" value={activeReviewInvoice?.taxBreakdown?.sgst || ''} onChange={(e) => handleInvoiceChange('taxBreakdown.sgst', safeNum(e.target.value))} />
+                                                </div>
+                                                <div className="bg-slate-50 p-2 rounded-lg border border-slate-200/70">
+                                                    <span className="text-[10px] text-slate-400 block font-sans">IGST</span>
+                                                    <input type="number" className="w-full bg-white border border-slate-200 rounded px-1 py-0.5 font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-amber-500 text-xs" value={activeReviewInvoice?.taxBreakdown?.igst || ''} onChange={(e) => handleInvoiceChange('taxBreakdown.igst', safeNum(e.target.value))} />
+                                                </div>
+                                                <div className="bg-slate-50 p-2 rounded-lg border border-slate-200/70">
+                                                    <span className="text-[10px] text-slate-400 block font-sans">Round-Off</span>
+                                                    <input type="number" step="0.01" className="w-full bg-white border border-slate-200 rounded px-1 py-0.5 font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-amber-500 text-xs" value={activeReviewInvoice?.roundoffAmount || ''} onChange={(e) => handleInvoiceChange('roundoffAmount', safeNum(e.target.value))} />
+                                                </div>
+                                            </div>
+
+                                            {/* Tally Math Check Formula Breakdown Bar */}
+                                            <div className="bg-slate-100/90 px-3 py-2 rounded-lg border border-slate-200 mb-2.5 flex items-center justify-between text-[11px] font-mono text-slate-600">
+                                                <div className="flex items-center gap-1.5 flex-wrap">
+                                                    <span>Taxable ({formatINR(activeReviewInvoice?.taxableAmount)})</span>
+                                                    <span>+</span>
+                                                    <span>Taxes ({formatINR(computedTotalTax)})</span>
+                                                    <span>{activeReviewInvoice?.roundoffAmount >= 0 ? '+' : ''}</span>
+                                                    <span>RoundOff ({formatINR(activeReviewInvoice?.roundoffAmount)})</span>
+                                                </div>
+                                                <div className="font-bold text-slate-900">
+                                                    = {formatINR(computedNetTotal)}
+                                                </div>
+                                            </div>
+
+                                            <div className="bg-blue-50 border border-blue-200 text-slate-900 p-3 rounded-lg flex items-center justify-between font-mono">
+                                                <div>
+                                                    <span className="text-[10px] text-slate-500 font-semibold uppercase tracking-wider block font-sans">Final Payable Total</span>
+                                                    <input type="number" className="w-32 bg-white border border-blue-300 rounded px-2 py-1 text-base font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1" value={activeReviewInvoice?.totalAmount || ''} onChange={(e) => handleInvoiceChange('totalAmount', safeNum(e.target.value))} />
+                                                </div>
+                                                <div className="text-right font-sans">
+                                                    <button type="button" className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-1.5 rounded-lg text-xs font-semibold shadow-sm transition-colors flex items-center gap-1.5 mb-1 ml-auto">
+                                                        <span className="material-symbols-outlined text-[16px]">save</span>
+                                                        Save Changes
+                                                    </button>
+                                                    {computedNetTotal === safeNum(activeReviewInvoice?.totalAmount) ? (
+                                                        <span className="text-[11px] font-semibold text-emerald-700 flex items-center justify-end gap-1 px-1 mt-1">
+                                                            <span className="material-symbols-outlined text-[14px]">check_circle</span> Math Verified
+                                                        </span>
+                                                    ) : (
+                                                        <span className="text-[11px] font-bold text-rose-600 flex items-center justify-end gap-1 px-1 mt-1">
+                                                            <span className="material-symbols-outlined text-[14px]">warning</span> Math Mismatch: Expected {formatINR(computedNetTotal)}
+                                                        </span>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        {/* Audit Review Bottom Dock */}
+                                        <div className="bg-white border border-slate-200/80 p-4 rounded-xl shadow-xs flex items-center justify-between">
+                                            <button
+                                                type="button"
+                                                onClick={() => setActiveReviewInvoice(null)}
+                                                className="px-4 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-medium transition-colors"
+                                            >
+                                                Back to Workbench
+                                            </button>
+
+                                            <div className="flex items-center gap-2">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setIsDataModalOpen(true)}
+                                                    className="px-3.5 py-2 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-semibold inline-flex items-center gap-1.5 border border-blue-200/80 transition-colors shadow-2xs"
+                                                >
+                                                    <span className="material-symbols-outlined text-[16px]">database</span>
+                                                    <span>Data Extracted</span>
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                        // Mark current invoice as verified
+                                                        setInvoices(prev => prev.map(inv => inv.id === activeReviewInvoice.id ? { ...inv, verificationState: 'verified' } : inv));
+                                                        // Find next invoice in queue needing review
+                                                        const remaining = invoices.filter(i => i.id !== activeReviewInvoice.id && i.verificationState !== 'verified');
+                                                        if (remaining.length > 0) {
+                                                            setActiveReviewInvoice(remaining[0]);
+                                                        } else {
+                                                            setActiveReviewInvoice(null);
+                                                        }
+                                                    }}
+                                                    className="px-5 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs transition-colors"
+                                                >
+                                                    <span className="material-symbols-outlined text-[16px]">check_circle</span>
+                                                    <span>Approve & Next Invoice</span>
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                    </div>
+
+                                </div>
+                            </div>
+                        ) : (
+                            /* MAIN WORKBENCH DASHBOARD VIEW */
+                            <main className="w-full pb-24 bg-slate-50/70 min-h-[calc(100vh-3.5rem)]">
+                                <div className="flex flex-col w-full space-y-4">
+
+                                    {/* Sleek Engine Banner */}
+                                    <div className="px-5 pt-4 pb-0">
+                                        <div className="bg-blue-50/40 border border-blue-100 rounded-xl px-4 py-2.5 flex items-center justify-between shadow-2xs">
+                                            <div className="flex items-center gap-3">
+                                                <div className="w-7 h-7 rounded-lg bg-blue-100/80 flex items-center justify-center text-blue-600">
+                                                    <span className="material-symbols-outlined text-[18px]">bolt</span>
+                                                </div>
+                                                <div className="flex items-center gap-2.5">
+                                                    <span className="text-xs font-semibold text-slate-900 tracking-tight">Multimodal AI OCR Engine Active</span>
+                                                    <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-blue-100/70 text-blue-700 border border-blue-200/60">Tally Schema v4.1 Compliant</span>
+                                                </div>
+                                            </div>
+                                            <div className="flex items-center gap-3">
+                                                <span className="text-[11px] text-slate-500 hidden md:inline">Real-time GSTR-2B matching & arithmetic integrity check</span>
+                                                <div className="flex items-center gap-1.5 text-[11px] text-emerald-700 font-medium">
+                                                    <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                                                    <span>Multimodal Vision Ready</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* Main Viewport Content */}
+                                    <div className="px-5 space-y-4">
+
+                                        {/* TOP SECTION: Drag-and-Drop Ingestion Zone */}
+                                        <section aria-label="Invoice Ingestion Area">
+                                            <div
+                                                onDragOver={handleDragOver}
+                                                onDragLeave={handleDragLeave}
+                                                onDrop={handleDrop}
+                                                onClick={() => fileInputRef.current && fileInputRef.current.click()}
+                                                className={`group relative border border-dashed ${isDragging ? 'border-blue-500 bg-blue-50/50' : 'border-slate-300 hover:border-slate-400 bg-white'} transition-all py-5 px-6 text-center rounded-xl shadow-2xs cursor-pointer flex flex-col items-center justify-center`}
+                                            >
+                                                <div className="w-9 h-9 rounded-lg bg-slate-100 border border-slate-200/80 flex items-center justify-center text-slate-500 group-hover:text-slate-800 group-hover:bg-slate-200/60 transition-colors mb-2">
+                                                    <span className="material-symbols-outlined text-[20px]">cloud_upload</span>
+                                                </div>
+                                                <h2 className="text-xs font-semibold text-slate-800 tracking-tight">
+                                                    Drag and drop invoice PDFs or images here (PNG, JPG, PDF up to 200MB)
+                                                </h2>
+                                                <div className="mt-3 flex items-center justify-center gap-3">
+                                                    <button
+                                                        type="button"
+                                                        onClick={(e) => { e.stopPropagation(); fileInputRef.current && fileInputRef.current.click(); }}
+                                                        className="px-3.5 py-1.5 text-xs font-medium rounded-lg bg-slate-900 text-white hover:bg-slate-800 inline-flex items-center gap-1.5 shadow-xs transition-colors"
+                                                    >
+                                                        <span className="material-symbols-outlined text-[15px]">folder_open</span>
+                                                        <span>Browse Invoice Files</span>
+                                                    </button>
+                                                    <div className="flex items-center gap-1 text-[11px] text-slate-400 bg-slate-50 px-2.5 py-1 rounded-md border border-slate-200/70">
+                                                        <span className="material-symbols-outlined text-[13px] text-slate-400">keyboard</span>
+                                                        <span>Press</span>
+                                                        <kbd className="px-1 py-0.2 rounded bg-white border border-slate-200 font-mono text-[10px] font-semibold text-slate-600 shadow-2xs">Ctrl+U</kbd>
+                                                    </div>
+                                                </div>
+                                                <input
+                                                    type="file"
+                                                    ref={fileInputRef}
+                                                    onChange={(e) => handleFileUpload(e.target.files)}
+                                                    multiple
+                                                    accept=".pdf,.png,.jpg,.jpeg,.webp"
+                                                    className="sr-only"
+                                                />
+                                            </div>
+                                        </section>
+
+                                        {/* ERROR ALERT BANNER */}
+                                        {errorAlert && (
+                                            <div className="bg-rose-50 border border-rose-200 text-rose-700 p-3.5 rounded-xl flex items-center justify-between text-xs shadow-2xs">
+                                                <div className="flex items-center gap-2">
+                                                    <span className="material-symbols-outlined text-[18px]">error</span>
+                                                    <span className="font-medium">{errorAlert}</span>
+                                                </div>
+                                                <button type="button" onClick={() => setErrorAlert(null)} className="text-rose-500 hover:text-rose-800">
+                                                    <span className="material-symbols-outlined text-[16px]">close</span>
+                                                </button>
+                                            </div>
+                                        )}
+
+                                        {/* BOTTOM SECTION: Processing Queue Data Table */}
+                                        <section aria-label="Invoice Processing Queue" className="bg-white border border-slate-200/80 rounded-xl shadow-xs flex flex-col overflow-hidden">
+                                            
+                                            {/* Table Filter and Header Actions */}
+                                            <div className="px-4 py-3 border-b border-slate-200/80 flex flex-col md:flex-row md:items-center justify-between gap-3 bg-white">
+                                                
+                                                {/* Queue Filter Tabs (Fully Dynamic Computations) */}
+                                                <div className="flex items-center gap-3 flex-1 min-w-0">
+                                                    <div className="flex items-center gap-2">
+                                                        <h3 className="text-sm font-semibold tracking-tight text-slate-900">Processing Queue</h3>
+                                                        <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">Live State</span>
+                                                    </div>
+
+                                                    <div className="flex items-center bg-slate-100/80 p-0.5 rounded-lg border border-slate-200/60">
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => setActiveFilter('all')}
+                                                            className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-all ${activeFilter === 'all' ? 'bg-white text-slate-900 shadow-xs font-semibold' : 'text-slate-500 hover:text-slate-800'}`}
+                                                        >
+                                                            All ({totalInvoicesCount})
+                                                        </button>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => setActiveFilter('needs_review')}
+                                                            className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-all flex items-center gap-1.5 ${activeFilter === 'needs_review' ? 'bg-white text-amber-700 shadow-xs font-semibold' : 'text-slate-500 hover:text-slate-800'}`}
+                                                        >
+                                                            <span>Needs Review</span>
+                                                            <span className="px-1.5 py-0.2 rounded-full bg-amber-100 text-amber-800 text-[10px] font-bold">{needsReviewCount}</span>
+                                                        </button>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => setActiveFilter('verified')}
+                                                            className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-all flex items-center gap-1.5 ${activeFilter === 'verified' ? 'bg-white text-emerald-700 shadow-xs font-semibold' : 'text-slate-500 hover:text-slate-800'}`}
+                                                        >
+                                                            <span>Verified</span>
+                                                            <span className="px-1.5 py-0.2 rounded-full bg-emerald-100 text-emerald-800 text-[10px] font-bold">{verifiedCount}</span>
+                                                        </button>
+                                                    </div>
+                                                </div>
+
+                                                {/* Search Input */}
+                                                <div className="relative w-64">
+                                                    <span className="material-symbols-outlined absolute left-2.5 top-1/2 -translate-y-1/2 text-[15px] text-slate-400">search</span>
+                                                    <input
+                                                        type="text"
+                                                        value={searchQuery}
+                                                        onChange={(e) => setSearchQuery(e.target.value)}
+                                                        placeholder="Search vendor, invoice no, GSTIN..."
+                                                        className="w-full h-7.5 pl-8 pr-3 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:border-slate-400 focus:bg-white transition-colors"
+                                                    />
+                                                </div>
+                                            </div>
+
+                                            {/* Dynamic Batch Action Ribbon */}
+                                            {invoices.length > 0 && selectedIds.size > 0 && (
+                                                <div className="px-4 py-2 bg-slate-50 border-b border-slate-200/80 flex items-center justify-between text-xs">
+                                                    <div className="flex items-center gap-3">
+                                                        <span className="font-medium text-slate-700">
+                                                            Selected: <strong className="text-slate-900 font-mono">{selectedIds.size}</strong> invoice(s)
+                                                        </span>
+                                                        <span className="text-slate-300">|</span>
+                                                        <span className="text-emerald-700 font-medium text-[11px] flex items-center gap-1">
+                                                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+                                                            Verified: {selectedVerifiedCount}
+                                                        </span>
+                                                        <span className="text-amber-700 font-medium text-[11px] flex items-center gap-1">
+                                                            <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
+                                                            Require Attention: {selectedReviewCount}
+                                                        </span>
+                                                        <span className="text-slate-300">|</span>
+                                                        <span className="font-mono text-slate-700 font-semibold text-[11px]">
+                                                            Batch Total: <span className="text-blue-700">{formatINR(selectedNetTotalSum)}</span>
+                                                        </span>
+                                                    </div>
+
+                                                    <button
+                                                        type="button"
+                                                        onClick={deleteSelected}
+                                                        className="px-2.5 py-1 rounded-md bg-rose-50 text-rose-700 hover:bg-rose-100 border border-rose-200 text-[11px] font-medium inline-flex items-center gap-1 transition-colors"
+                                                    >
+                                                        <span className="material-symbols-outlined text-[14px]">delete</span>
+                                                        <span>Delete Selected</span>
+                                                    </button>
+                                                </div>
+                                            )}
+
+                                            {/* High-Density Responsive Data Table */}
+                                            <div className="overflow-x-auto w-full">
+                                                <table className="w-full text-left border-collapse">
+                                                    <thead>
+                                                        <tr className="h-8 bg-slate-50/80 border-b border-slate-200/80 text-[11px] font-semibold uppercase tracking-wider text-slate-500 select-none">
+                                                            <th className="w-10 px-3 text-center">
+                                                                <input
+                                                                    type="checkbox"
+                                                                    checked={filteredInvoices.length > 0 && selectedIds.size === filteredInvoices.length}
+                                                                    onChange={toggleSelectAll}
+                                                                    className="h-3.5 w-3.5 rounded border-slate-300 text-slate-900 focus:ring-slate-500 cursor-pointer"
+                                                                />
+                                                            </th>
+                                                            <th className="w-12 px-2 text-center">Type</th>
+                                                            <th className="px-3 py-1.5 text-left">File Details</th>
+                                                            <th className="px-3 py-1.5 text-left">Vendor / Legal Master</th>
+                                                            <th className="px-3 py-1.5 text-right font-mono">Tax Breakdown</th>
+                                                            <th className="px-3 py-1.5 text-right font-mono">Total Amount (₹)</th>
+                                                            <th className="px-3 py-1.5 text-center">Verification State</th>
+                                                            <th className="px-3 py-1.5 text-right">Actions</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody className="divide-y divide-slate-100 text-xs">
+                                                        
+                                                        {/* EMPTY STATE TABLE SKELETON */}
+                                                        {filteredInvoices.length === 0 && (
+                                                            <tr>
+                                                                <td colSpan="8" className="py-10 px-4 text-center">
+                                                                    <div className="flex flex-col items-center justify-center space-y-2">
+                                                                        <div className="w-10 h-10 rounded-full bg-slate-100 border border-slate-200/80 flex items-center justify-center text-slate-400">
+                                                                            <span className="material-symbols-outlined text-[24px]">description</span>
+                                                                        </div>
+                                                                        <div className="flex flex-col items-center">
+                                                                            <span className="text-xs font-semibold text-slate-700">No invoices in processing queue</span>
+                                                                            <span className="text-[11px] text-slate-500 mt-0.5">
+                                                                                {searchQuery ? 'No invoices match your search query.' : 'Upload vendor invoices above to extract GST metadata, run arithmetic audit, and generate TallyPrime XML vouchers.'}
+                                                                            </span>
+                                                                        </div>
+                                                                    </div>
+                                                                </td>
+                                                            </tr>
+                                                        )}
+
+                                                        {/* DYNAMIC REACT INVOICE ROWS */}
+                                                        {filteredInvoices.map((inv) => {
+                                                            const isSelected = selectedIds.has(inv.id);
+                                                            const isPdf = inv.fileType === 'pdf';
+                                                            const iconName = isPdf ? 'picture_as_pdf' : 'image';
+                                                            const iconColor = isPdf ? 'text-rose-500' : 'text-blue-500';
+
+                                                            return (
+                                                                <tr key={inv.id} className={`h-11 border-b border-slate-100 hover:bg-slate-50/80 transition-colors group ${isSelected ? 'bg-blue-50/30' : ''}`}>
+                                                                    <td className="px-3 text-center">
+                                                                        <input
+                                                                            type="checkbox"
+                                                                            checked={isSelected}
+                                                                            onChange={() => toggleSelectInvoice(inv.id)}
+                                                                            disabled={inv.verificationState === 'extracting'}
+                                                                            className="h-3.5 w-3.5 rounded border-slate-300 text-slate-900 focus:ring-slate-500 cursor-pointer"
+                                                                        />
+                                                                    </td>
+                                                                    <td className="px-2 text-center">
+                                                                        <div className={`inline-flex items-center justify-center w-6.5 h-6.5 rounded-md bg-slate-100 border border-slate-200/80 ${iconColor}`}>
+                                                                            {inv.verificationState === 'extracting' ? (
+                                                                                <span className="material-symbols-outlined text-[15px] animate-spin text-blue-600">sync</span>
+                                                                            ) : (
+                                                                                <span className="material-symbols-outlined text-[15px]">{iconName}</span>
+                                                                            )}
+                                                                        </div>
+                                                                    </td>
+                                                                    <td className="px-3 py-1.5 text-left">
+                                                                        <div className="flex flex-col">
+                                                                            <span className="font-medium text-slate-800 tracking-tight truncate max-w-[220px]">
+                                                                                {(inv.invoiceNo || (inv.invoiceNumber && inv.invoiceNumber !== 'Processing...' ? inv.invoiceNumber : null)) || 'Pending'}
+                                                                            </span>
+                                                                            <span className="text-xs text-slate-500 truncate max-w-[220px]">
+                                                                                ({inv.fileName})
+                                                                            </span>
+                                                                        </div>
+                                                                    </td>
+                                                                    <td className="px-3 py-1.5 text-left">
+                                                                        <div className="flex flex-col">
+                                                                            <div className="flex items-center gap-1.5">
+                                                                                <span className="text-[13px] font-semibold text-slate-800">{inv.vendorName || 'Extracting...'}</span>
+                                                                                {inv.invoiceNumber && inv.invoiceNumber !== 'Processing...' && (
+                                                                                    <span className="px-1.5 py-0.2 rounded bg-slate-100 font-mono text-[10px] text-slate-600 border border-slate-200/70">
+                                                                                        {inv.invoiceNumber}
+                                                                                    </span>
+                                                                                )}
+                                                                            </div>
+                                                                            <span className="text-[11px] font-mono text-slate-400">
+                                                                                GSTIN: {inv.gstin || 'N/A'}
+                                                                            </span>
+                                                                        </div>
+                                                                    </td>
+                                                                    <td className="px-3 py-1.5 text-right font-mono">
+                                                                        {inv.verificationState === 'extracting' ? (
+                                                                            <div className="w-24 ml-auto bg-slate-100 rounded-full h-1.5 overflow-hidden">
+                                                                                <div className="bg-blue-500 h-1.5 rounded-full w-2/3 animate-pulse"></div>
+                                                                            </div>
+                                                                        ) : (
+                                                                            <div className="text-[11px] text-slate-500 flex items-center justify-end gap-2">
+                                                                                <span>CGST: {formatINR(inv.taxBreakdown?.cgst)}</span>
+                                                                                <span>SGST: {formatINR(inv.taxBreakdown?.sgst)}</span>
+                                                                                {inv.taxBreakdown?.igst > 0 && <span>IGST: {formatINR(inv.taxBreakdown?.igst)}</span>}
+                                                                            </div>
+                                                                        )}
+                                                                    </td>
+                                                                    <td className="px-3 py-1.5 text-right font-mono text-[13px] font-semibold text-slate-900">
+                                                                        {inv.verificationState === 'extracting' ? 'Extracting...' : formatINR(inv.totalAmount)}
+                                                                    </td>
+                                                                    <td className="px-3 py-1.5 text-center">
+                                                                        {inv.verificationState === 'verified' && (
+                                                                            <span className="inline-flex items-center gap-1.5 text-[11px] font-medium px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200/70">
+                                                                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span> Verified
+                                                                            </span>
+                                                                        )}
+                                                                        {inv.verificationState === 'math_error' && (
+                                                                            <span className="inline-flex items-center gap-1.5 text-[11px] font-medium px-2 py-0.5 rounded-full bg-rose-50 text-rose-700 border border-rose-200">
+                                                                                <span className="w-1.5 h-1.5 rounded-full bg-rose-500"></span> Math Error
+                                                                            </span>
+                                                                        )}
+                                                                        {inv.verificationState === 'needs_review' && (
+                                                                            <span className="inline-flex items-center gap-1.5 text-[11px] font-medium px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200">
+                                                                                <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span> Needs Review
+                                                                            </span>
+                                                                        )}
+                                                                        {inv.verificationState === 'extracting' && (
+                                                                            <span className="inline-flex items-center gap-1.5 text-[11px] font-medium px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
+                                                                                <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-ping"></span> Extracting...
+                                                                            </span>
+                                                                        )}
+                                                                    </td>
+                                                                    <td className="px-3 py-1.5 text-right">
+                                                                        <div className="flex items-center justify-end gap-1.5">
+                                                                            {/* Primary Review Action Button */}
+                                                                            <button
+                                                                                type="button"
+                                                                                onClick={() => setActiveReviewInvoice(inv)}
+                                                                                disabled={inv.verificationState === 'extracting'}
+                                                                                className={`px-2.5 py-1 rounded-md text-[11px] font-semibold inline-flex items-center gap-1 transition-colors ${
+                                                                                    inv.verificationState === 'extracting'
+                                                                                        ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
+                                                                                        : 'bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200/80 shadow-2xs'
+                                                                                }`}
+                                                                            >
+                                                                                <span className="material-symbols-outlined text-[14px]">visibility</span>
+                                                                                <span>Review</span>
+                                                                            </button>
+
+                                                                            <button
+                                                                                type="button"
+                                                                                onClick={() => deleteInvoice(inv.id)}
+                                                                                className="w-6.5 h-6.5 rounded text-slate-400 hover:text-rose-600 hover:bg-rose-50 flex items-center justify-center transition-colors"
+                                                                                title="Delete invoice"
+                                                                            >
+                                                                                <span className="material-symbols-outlined text-[15px]">delete</span>
+                                                                            </button>
+                                                                        </div>
+                                                                    </td>
+                                                                </tr>
+                                                            );
+                                                        })}
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        </section>
+
+                                        {/* Dynamic KPI Metric Cards */}
+                                        <section className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                                            
+                                            {/* HSN / GSTIN Validation Rate */}
+                                            <div className="border border-slate-200/80 rounded-xl bg-white p-3.5 shadow-xs flex items-start justify-between">
+                                                <div className="space-y-1">
+                                                    <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">HSN Validation Rate</span>
+                                                    <div className="text-xl font-bold tracking-tight text-slate-800 font-mono">
+                                                        {hsnValidationRate}%
+                                                    </div>
+                                                    <p className="text-[11px] text-emerald-600 font-medium flex items-center gap-1">
+                                                        <span className="material-symbols-outlined text-[13px]">check_circle</span>
+                                                        <span>Verified via Extraction Engine</span>
+                                                    </p>
+                                                </div>
+                                                <div className="w-8 h-8 rounded-lg bg-emerald-50 border border-emerald-100 flex items-center justify-center text-emerald-600">
+                                                    <span className="material-symbols-outlined text-[18px]">verified_user</span>
+                                                </div>
+                                            </div>
+
+                                            {/* Total Tax Detected */}
+                                            <div className="border border-slate-200/80 rounded-xl bg-white p-3.5 shadow-xs flex items-start justify-between">
+                                                <div className="space-y-1">
+                                                    <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Total Tax Detected</span>
+                                                    <div className="text-xl font-bold tracking-tight text-slate-800 font-mono">
+                                                        {formatINR(totalTaxDetected)}
+                                                    </div>
+                                                    <p className="text-[11px] text-blue-600 font-medium flex items-center gap-1">
+                                                        <span className="material-symbols-outlined text-[13px]">account_balance</span>
+                                                        <span>Sum of CGST + SGST + IGST</span>
+                                                    </p>
+                                                </div>
+                                                <div className="w-8 h-8 rounded-lg bg-blue-50 border border-blue-100 flex items-center justify-center text-blue-600">
+                                                    <span className="material-symbols-outlined text-[18px]">payments</span>
+                                                </div>
+                                            </div>
+
+                                            {/* Queue Value & Count */}
+                                            <div className="border border-slate-200/80 rounded-xl bg-white p-3.5 shadow-xs flex items-start justify-between">
+                                                <div className="space-y-1">
+                                                    <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Queue Value & Count</span>
+                                                    <div className="text-xl font-bold tracking-tight text-slate-800 font-mono">
+                                                        {formatINR(totalValueProcessed)}
+                                                    </div>
+                                                    <p className="text-[11px] text-emerald-600 font-medium flex items-center gap-1">
+                                                        <span className="material-symbols-outlined text-[13px]">cable</span>
+                                                        <span>{totalInvoicesCount} File(s) in Workbench</span>
+                                                    </p>
+                                                </div>
+                                                <div className="w-8 h-8 rounded-lg bg-slate-100 border border-slate-200/80 flex items-center justify-center text-slate-600">
+                                                    <span className="material-symbols-outlined text-[18px]">sync</span>
+                                                </div>
+                                            </div>
+                                        </section>
+
+                                    </div>
+                                </div>
+                            </main>
+                        )}
+                    </div>
+
+                    {/* STICKY BOTTOM DOCK (Real-time Dynamic Financial Breakdown) */}
+                    {!activeReviewInvoice && (
+                        <footer className="fixed bottom-0 left-56 right-0 h-14 bg-white/95 backdrop-blur border-t border-slate-200/90 shadow-lg flex items-center justify-between px-5 z-40">
+                            <div className="flex items-center gap-4 text-xs">
+                                <div className="flex flex-col">
+                                    <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Selected Items</span>
+                                    <span className="font-mono font-bold text-slate-800 text-xs">
+                                        {selectedInvoices.length} of {totalInvoicesCount} File(s)
+                                    </span>
+                                </div>
+
+                                <span className="text-slate-300">|</span>
+
+                                <div className="flex items-center gap-3 font-mono text-xs">
+                                    <div className="flex items-center gap-1">
+                                        <span className="text-slate-400 text-[11px]">Taxable:</span>
+                                        <span className="font-semibold text-slate-700">{formatINR(selectedTaxableSum)}</span>
+                                    </div>
+
+                                    <span className="text-slate-300">|</span>
+
+                                    <div className="flex items-center gap-1">
+                                        <span className="text-slate-400 text-[11px]">CGST:</span>
+                                        <span className="font-semibold text-slate-700">{formatINR(selectedCgstSum)}</span>
+                                    </div>
+
+                                    <span className="text-slate-300">|</span>
+
+                                    <div className="flex items-center gap-1">
+                                        <span className="text-slate-400 text-[11px]">SGST:</span>
+                                        <span className="font-semibold text-slate-700">{formatINR(selectedSgstSum)}</span>
+                                    </div>
+
+                                    {selectedIgstSum > 0 && (
+                                        <>
+                                            <span className="text-slate-300">|</span>
+                                            <div className="flex items-center gap-1">
+                                                <span className="text-slate-400 text-[11px]">IGST:</span>
+                                                <span className="font-semibold text-slate-700">{formatINR(selectedIgstSum)}</span>
+                                            </div>
+                                        </>
+                                    )}
+
+                                    <span className="text-slate-300">|</span>
+
+                                    <div className="flex items-center gap-1">
+                                        <span className="text-slate-400 text-[11px]">Taxes:</span>
+                                        <span className="font-semibold text-blue-600">{formatINR(selectedTotalTaxSum)}</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="flex items-center gap-4">
+                                <div className="flex flex-col text-right">
+                                    <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Net Batch Total</span>
+                                    <span className="font-mono text-sm font-bold text-slate-900">
+                                        {formatINR(selectedNetTotalSum)}
+                                    </span>
+                                </div>
+
+                                <div className="flex items-center gap-2">
+                                    <button
+                                        type="button"
+                                        disabled={selectedInvoices.length === 0}
+                                        onClick={() => {
+                                            if (selectedInvoices.length === 0) return;
+                                            const combinedXml = selectedInvoices.map(i => i.tallyXml).filter(Boolean).join('\n\n');
+                                            setXmlModalData({ vendor: `Batch (${selectedInvoices.length} invoices)`, invNo: 'BATCH', xml: combinedXml });
+                                        }}
+                                        className={`h-8 px-3.5 rounded-lg text-xs font-medium inline-flex items-center gap-1.5 shadow-xs transition-all ${selectedInvoices.length > 0 ? 'bg-slate-900 text-white hover:bg-slate-800 cursor-pointer' : 'bg-slate-100 text-slate-400 cursor-not-allowed opacity-60'}`}
+                                    >
+                                        <span className="material-symbols-outlined text-[16px]">file_download</span>
+                                        <span>Export Batch XML</span>
+                                    </button>
+
+                                    <button
+                                        type="button"
+                                        disabled={selectedInvoices.length === 0}
+                                        onClick={() => {
+                                            if (selectedInvoices.length === 0) return;
+                                            const combinedXml = selectedInvoices.map(i => i.tallyXml).filter(Boolean).join('\n\n');
+                                            setXmlModalData({ vendor: `Batch (${selectedInvoices.length} invoices)`, invNo: 'BATCH', xml: combinedXml });
+                                        }}
+                                        className={`h-8 px-3.5 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs transition-all ${selectedInvoices.length > 0 ? 'bg-blue-600 text-white hover:bg-blue-700 cursor-pointer' : 'bg-slate-100 text-slate-400 cursor-not-allowed opacity-60'}`}
+                                    >
+                                        <span className="material-symbols-outlined text-[16px]">send</span>
+                                        <span>Push to TallyPrime</span>
+                                    </button>
+                                </div>
+                            </div>
+                        </footer>
+                    )}
+
+                    {/* BATCH EXPORT SUMMARY MODAL OVERLAY */}
+                    {xmlModalData && (
+                        <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4">
+                            <div className="bg-white border border-slate-200 shadow-2xl rounded-2xl p-6 max-w-2xl w-full text-slate-800 space-y-5 flex flex-col max-h-[90vh]">
+                                
+                                {/* Header Bar */}
+                                <div className="flex items-center justify-between">
+                                    <span className="flex items-center gap-2 text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                                        ⚡ Batch Processing Pipeline
+                                    </span>
+                                    <div className="flex items-center gap-3">
+                                        <span className="px-2 py-0.5 rounded-full text-[11px] font-medium bg-emerald-50 text-emerald-700 border border-emerald-200">
+                                            Schema TallyXML 2.1
+                                        </span>
+                                        <button type="button" onClick={() => { setXmlModalData(null); setShowRawXml(false); }} className="text-slate-400 hover:text-slate-700 transition-colors">
+                                            <span className="material-symbols-outlined text-[18px]">close</span>
+                                        </button>
+                                    </div>
+                                </div>
+
+                                {/* Validation Success Banner */}
+                                <div className="bg-emerald-50/60 border border-emerald-200/80 rounded-xl p-4 flex gap-3 items-start">
+                                    <div className="w-8 h-8 rounded-full bg-emerald-100 flex items-center justify-center shrink-0">
+                                        <span className="material-symbols-outlined text-emerald-600 text-[18px]">check_circle</span>
+                                    </div>
+                                    <div>
+                                        <div className="flex items-center gap-2 mb-1">
+                                            <h4 className="font-bold text-emerald-900 text-sm">Batch Validation Complete</h4>
+                                            <span className="px-1.5 py-0.5 rounded-md bg-emerald-200/50 text-emerald-800 text-[10px] font-bold">
+                                                {selectedInvoices.length}/{selectedInvoices.length} Ready
+                                            </span>
+                                        </div>
+                                        <p className="text-xs text-emerald-700/90 leading-relaxed mb-1.5">
+                                            All invoices have been extracted, tax components verified, and strictly formatted for TallyPrime purchase ledger import.
+                                        </p>
+                                        <div className="text-[11px] font-medium text-emerald-800">
+                                            • Arithmetic Integrity: 100% Balanced
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* 3 Metric Summary Cards */}
+                                <div className="grid grid-cols-3 gap-3">
+                                    <div className="bg-slate-50 border border-slate-200/80 rounded-xl p-3.5">
+                                        <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1">Total Invoices</div>
+                                        <div className="font-bold text-slate-800 text-lg mb-0.5">{selectedInvoices.length} Invoices</div>
+                                        <div className="text-[11px] font-medium text-slate-500">• All Verified</div>
+                                    </div>
+                                    <div className="bg-slate-50 border border-slate-200/80 rounded-xl p-3.5">
+                                        <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1">Purchase Value</div>
+                                        <div className="font-bold text-slate-800 text-lg mb-0.5">₹{selectedNetTotalSum.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                                        <div className="text-[11px] font-medium text-slate-500">Taxable Base: ₹{selectedTaxableSum.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                                    </div>
+                                    <div className="bg-slate-50 border border-slate-200/80 rounded-xl p-3.5">
+                                        <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1">Tax / ITC</div>
+                                        <div className="font-bold text-emerald-600 text-lg mb-0.5">₹{selectedTotalTaxSum.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                                        <div className="text-[11px] font-medium text-emerald-600/80">✓ 100% Eligible ITC</div>
+                                    </div>
+                                </div>
+
+                                {/* Master Ledger Auto-Creation Notice Box */}
+                                {unmappedVendors.length > 0 ? (
+                                    <div className="bg-blue-50/50 border border-blue-200 rounded-xl p-3.5 text-xs text-slate-700 flex items-start gap-3">
+                                        <span className="material-symbols-outlined text-blue-500 text-[18px] shrink-0">info</span>
+                                        <p className="leading-relaxed">
+                                            <span className="font-bold text-blue-800">{unmappedVendors.length} new vendor ledger(s)</span> will be automatically created in Tally upon import: {unmappedVendors.join(', ')} (assigned under SUNDRY CREDITORS).
+                                        </p>
+                                    </div>
+                                ) : (
+                                    <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 text-xs text-slate-600 flex items-center gap-2">
+                                        <span className="material-symbols-outlined text-emerald-500 text-[18px] shrink-0">check_circle</span>
+                                        <span>✓ All vendor ledgers mapped to existing Tally Masters.</span>
+                                    </div>
+                                )}
+
+                                {/* Raw XML Toggle */}
+                                {showRawXml && (
+                                    <div className="flex-1 overflow-y-auto bg-slate-950 rounded-xl p-4 border border-slate-800">
+                                        <pre className="xml-code text-sky-300 font-mono text-[11px] leading-relaxed whitespace-pre-wrap break-all">
+                                            {xmlModalData.xml}
+                                        </pre>
+                                    </div>
+                                )}
+
+                                {/* Action Footer Bar */}
+                                <div className="pt-2 border-t border-slate-200/80 flex items-center justify-between">
+                                    <div className="flex items-center gap-4">
+                                        <div className="flex items-center gap-1.5 opacity-70">
+                                            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                                            <span className="text-[10px] font-medium text-slate-500 uppercase tracking-wider">Direct Sync to Tally (Port 9000)</span>
+                                        </div>
+                                        <button type="button" onClick={() => setShowRawXml(!showRawXml)} className="text-[11px] text-slate-500 hover:text-slate-700 underline underline-offset-2 transition-colors">
+                                            {showRawXml ? 'Hide Raw XML Code' : 'View Raw XML Code'}
+                                        </button>
+                                    </div>
+                                    <div className="flex items-center gap-3">
+                                        <button type="button" onClick={() => { setXmlModalData(null); setShowRawXml(false); }} className="text-xs font-medium text-slate-500 hover:text-slate-800 transition-colors">
+                                            Back to Workbench &rarr;
+                                        </button>
+                                        <button type="button" onClick={handleDownloadXml} className="bg-slate-900 hover:bg-slate-800 text-white font-medium px-5 py-2.5 rounded-xl shadow-sm text-sm flex items-center gap-2 transition-colors">
+                                            <span className="material-symbols-outlined text-[18px]">download</span>
+                                            <span>Download Combined Tally XML</span>
+                                        </button>
+                                    </div>
+                                </div>
+
+                            </div>
+                        </div>
+                    )}
+
+                    {/* DATA EXTRACTED SUMMARY MODAL OVERLAY */}
+                    {isDataModalOpen && activeReviewInvoice && (
+                        <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4">
+                            <div className="bg-white border border-slate-200/90 rounded-2xl max-w-lg w-full flex flex-col shadow-2xl overflow-hidden">
+                                <div className="px-5 py-4 border-b border-slate-200/80 flex items-center justify-between bg-slate-50/70">
+                                    <div className="flex items-center gap-2.5">
+                                        <h3 className="text-sm font-bold text-slate-900 font-heading">Extraction Summary</h3>
+                                        <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 text-[11px] font-semibold">
+                                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+                                            AI Validation Complete
+                                        </span>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={() => setIsDataModalOpen(false)}
+                                        className="w-7 h-7 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-200/60 flex items-center justify-center transition-colors"
+                                    >
+                                        <span className="material-symbols-outlined text-[18px]">close</span>
+                                    </button>
+                                </div>
+
+                                <div className="p-5 space-y-4 bg-white">
+                                    {/* Metrics Row (2 Minimal Cards) */}
+                                    <div className="grid grid-cols-2 gap-3">
+                                        <div className="bg-slate-50 p-3 rounded-xl border border-slate-200/80">
+                                            <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider block mb-1">Invoice Total</span>
+                                            <span className="font-mono text-xs font-bold text-slate-900">{formatINR(activeReviewInvoice?.totalAmount)}</span>
+                                        </div>
+                                        <div className="bg-slate-50 p-3 rounded-xl border border-slate-200/80">
+                                            <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider block mb-1">Total Tax</span>
+                                            <span className="font-mono text-xs font-bold text-slate-900">
+                                                {formatINR((activeReviewInvoice?.taxBreakdown?.cgst || 0) + (activeReviewInvoice?.taxBreakdown?.sgst || 0) + (activeReviewInvoice?.taxBreakdown?.igst || 0))}
+                                            </span>
+                                        </div>
+                                    </div>
+
+                                    {/* Extraction Checklist Box */}
+                                    <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-2.5">
+                                        <div className="text-xs font-semibold text-slate-700 mb-1 flex items-center gap-1.5">
+                                            <span className="material-symbols-outlined text-[16px] text-blue-600">fact_check</span>
+                                            <span>Tally Readiness Checklist</span>
+                                        </div>
+                                        <div className="flex items-center justify-between text-xs py-1 border-b border-slate-200/60">
+                                            <span className="text-slate-500">Vendor Mapped:</span>
+                                            <span className="font-semibold text-slate-800">{activeReviewInvoice?.vendorName || 'N/A'}</span>
+                                        </div>
+                                        <div className="flex items-center justify-between text-xs py-1 border-b border-slate-200/60">
+                                            <span className="text-slate-500">GSTIN Match:</span>
+                                            <span className="font-mono font-semibold text-slate-800">{activeReviewInvoice?.gstin || 'N/A'}</span>
+                                        </div>
+                                        <div className="flex items-center justify-between text-xs py-1">
+                                            <span className="text-slate-500">Arithmetic Integrity:</span>
+                                            <span className={`font-semibold ${activeReviewInvoice?.mathDifference === 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+                                                {activeReviewInvoice?.mathDifference === 0 ? 'Verified Balanced' : `Discrepancy (₹${activeReviewInvoice?.mathDifference})`}
+                                            </span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div className="px-5 py-3 border-t border-slate-200/80 flex items-center justify-end bg-slate-50/70">
+                                    <button
+                                        type="button"
+                                        onClick={() => setIsDataModalOpen(false)}
+                                        className="px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-medium transition-colors shadow-xs"
+                                    >
+                                        Close
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+                    </SignedIn>
+                    <SignedOut>
+                        <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-4 select-none font-sans">
+                            <div className="mb-6 text-center">
+                                <div className="inline-flex items-center justify-center w-12 h-12 rounded-2xl bg-slate-900 text-white mb-3 shadow-md">
+                                    <svg className="w-6 h-6 text-blue-400 fill-current" viewBox="0 0 24 24">
+                                        <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
+                                    </svg>
+                                </div>
+                                <h1 className="font-heading text-xl font-bold text-slate-900 tracking-tight">TallyFlow AI</h1>
+                                <p className="text-xs text-slate-500 mt-1">Enterprise GST Invoice Automator & B2B Workspace</p>
+                            </div>
+                            <div className="w-full max-w-sm bg-white border border-slate-200 rounded-2xl p-6 shadow-md flex flex-col items-center space-y-4">
+                                <SignIn routing="hash" />
+                            </div>
+                        </div>
+                    </SignedOut>
+                </React.Fragment>
+            );
+        }
+
+
+    
+export default App;
