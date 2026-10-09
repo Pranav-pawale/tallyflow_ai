@@ -1,14 +1,29 @@
-require('dotenv').config({ override: true });
+require('dotenv').config();
+
+process.on('uncaughtException', (err) => {
+    console.error('❌ FATAL CRASH (Uncaught Exception):', err.message);
+    console.error(err.stack);
+    process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('❌ FATAL CRASH (Unhandled Rejection):', reason);
+});
+const { ClerkExpressRequireAuth } = require('@clerk/clerk-sdk-node');
+if (!process.env.CLERK_SECRET_KEY) {
+    console.error("❌ CRITICAL ERROR: CLERK_SECRET_KEY is missing from .env file!");
+} else {
+    console.log("✅ Clerk Environment Keys Loaded Successfully.");
+}
+
 const express = require('express');
 const cors = require('cors');
-const { ClerkExpressRequireAuth } = require('@clerk/clerk-sdk-node');
-const rateLimit = require('express-rate-limit');
-const dotenv = require('dotenv');
 const multer = require('multer');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const path = require('path');
 const fs = require('fs');
 const sqlite3 = require('sqlite3').verbose();
+const { rateLimit } = require('express-rate-limit');
 
 const db = new sqlite3.Database('./database.sqlite', (err) => {
     if (err) {
@@ -68,39 +83,31 @@ function getMappedVendorLedger(orgId, rawVendorName) {
     });
 }
 
-// Load environment variables from .env file
-dotenv.config({ path: path.join(__dirname, '..', '.env'), override: true });
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Rate limiting
-const globalLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 100,
-    message: { success: false, error: 'Too many requests from this IP, please try again after 15 minutes' }
+// Clerk Authentication Middleware for protected routes
+const requireClerkAuth = ClerkExpressRequireAuth({
+    onError: (err, req, res) => {
+        console.error('🔴 Clerk Auth Rejected:', err.message);
+        res.status(401).json({ success: false, error: `Unauthorized: ${err.message}` });
+    }
 });
 
-const extractLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 10,
-    message: { success: false, error: 'Upload limit exceeded, please try again later' }
-});
-
-app.use(globalLimiter);
 
 // Enable CORS for frontend communication
 app.use(cors({
-    origin: 'http://localhost:5173',
-    methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Authorization', 'Content-Type']
+    origin: '*',
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Serve static frontend files from 'public' directory
-app.use(express.static(path.join(__dirname, '../frontend/dist')));
+app.use(express.static(path.join(__dirname, 'public')));
 
 // Ensure uploads directory exists
 const uploadsDir = path.join(__dirname, 'uploads');
@@ -422,12 +429,10 @@ async function processFileWithGemini(genAI, filePath, mimeType) {
     throw new Error(`AI extraction failed: ${lastError ? lastError.message : 'Unknown error'}`);
 }
 
-
-
 // API ENDPOINT: POST /api/vendors
-app.post('/api/vendors', (req, res) => {
+app.post('/api/vendors', requireClerkAuth, (req, res) => {
     const { rawVendorName, tallyLedgerName, gstin } = req.body;
-    const orgId = 'default_org';
+    const orgId = req.auth ? req.auth.orgId : 'default_org';
     if (!rawVendorName || !tallyLedgerName) {
         return res.status(400).json({ success: false, error: 'Missing required fields' });
     }
@@ -435,11 +440,19 @@ app.post('/api/vendors', (req, res) => {
     res.json({ success: true });
 });
 
-// API ENDPOINT: POST /api/extract-invoice (Supports concurrent multi-file upload processing)
-app.post('/api/extract-invoice', ClerkExpressRequireAuth({}), extractLimiter, upload.any(), async (req, res) => {
+const extractLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 50, // Limit each IP to 50 extraction batch requests per window
+    message: { success: false, error: 'Too many invoice extraction requests from this IP. Please try again after 15 minutes.' },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+
+// API ENDPOINT: POST /api/extract-invoice (Protected by Clerk Auth, Supports concurrent multi-file upload processing)
+app.post('/api/extract-invoice', extractLimiter, requireClerkAuth, upload.any(), async (req, res) => {
     const uploadedFiles = req.files || [];
-    const userId = req.auth ? req.auth.userId : 'default_user';
-    const orgId = req.auth ? (req.auth.orgId || 'default_org') : 'default_org';
+    const userId = req.auth ? req.auth.userId : null;
+    const orgId = req.auth ? req.auth.orgId : null;
 
     try {
         if (!uploadedFiles || uploadedFiles.length === 0) {
@@ -572,9 +585,9 @@ app.post('/api/extract-invoice', ClerkExpressRequireAuth({}), extractLimiter, up
     }
 });
 
-app.get('/api/invoices', ClerkExpressRequireAuth({}), (req, res) => {
+app.get('/api/invoices', requireClerkAuth, (req, res) => {
     try {
-        const orgId = req.auth ? (req.auth.orgId || 'default_org') : 'default_org';
+        const orgId = req.auth ? req.auth.orgId : null;
         db.all('SELECT * FROM invoices WHERE orgId = ? ORDER BY createdAt DESC', [orgId], (err, rows) => {
             if (err) {
                 console.error('Database Error:', err.message);
@@ -617,29 +630,39 @@ app.get('/api/health', (req, res) => {
     });
 });
 
-// Clerk Error Handling Middleware
+// Global error fallback to prevent silent crashes
 app.use((err, req, res, next) => {
-    if (err.message === 'Unauthenticated' || err.status === 401) {
-        console.error('\n❌ CLERK AUTH REJECTED THE TOKEN:');
-        if (err.errors) {
-            console.error('Details:', JSON.stringify(err.errors, null, 2));
-        } else {
-            console.error('Reason:', err.message);
-        }
-        console.error('-----------------------------------\n');
-        return res.status(401).json({ success: false, error: 'Unauthenticated request' });
-    }
-    console.error('Unhandled Server Error:', err);
+    console.error('⚠️ Global Server Error:', err.message);
     res.status(500).json({ success: false, error: err.message || 'Internal Server Error' });
 });
 
+// Automated Cron Job to delete orphaned files in the uploads folder
+setInterval(() => {
+    try {
+        if (fs.existsSync(uploadsDir)) {
+            const files = fs.readdirSync(uploadsDir);
+            const now = Date.now();
+            files.forEach(file => {
+                const filePath = path.join(uploadsDir, file);
+                const stats = fs.statSync(filePath);
+                // Delete files older than 1 hour
+                if (now - stats.mtimeMs > 60 * 60 * 1000) {
+                    fs.unlinkSync(filePath);
+                }
+            });
+        }
+    } catch (err) {
+        console.error('[Cron] Error cleaning orphaned files:', err.message);
+    }
+}, 60 * 60 * 1000); // Run every hour
+
 // Start Server
 app.listen(PORT, () => {
-    console.log(`========================================================`);
-    console.log(`⚡ TallyFlow AI Backend Middleware Server Running`);
-    console.log(`🔒 Security: Gemini API Key secured on backend via .env`);
-    console.log(`🌐 Server Base URL: http://localhost:${PORT}`);
-    console.log(`🚀 API Endpoint:   http://localhost:${PORT}/api/extract-invoice`);
-    console.log(`========================================================`);
+    console.log(`🚀 Backend Server is running on http://localhost:${PORT}`);
+    if (!process.env.CLERK_SECRET_KEY) {
+        console.warn("⚠️ WARNING: CLERK_SECRET_KEY is missing from .env!");
+    }
+}).on('error', (err) => {
+    console.error('❌ Server Failed to Start:', err.message);
 });
 

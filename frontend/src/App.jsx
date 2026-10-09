@@ -1,400 +1,422 @@
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { SignedIn, SignedOut, SignIn, UserButton, useAuth } from "@clerk/clerk-react";
 
-        
 
-        function App() {
-            const { getToken } = useAuth();
-            // 1. Reactive State Management (0 hardcoded mock records!)
-            const [invoices, setInvoices] = useState([]);
-            const [selectedIds, setSelectedIds] = useState(new Set());
-            const [activeFilter, setActiveFilter] = useState('all'); // 'all' | 'needs_review' | 'verified'
-            const [searchQuery, setSearchQuery] = useState('');
-            const [errorAlert, setErrorAlert] = useState(null);
-            const [xmlModalData, setXmlModalData] = useState(null);
-            const [showRawXml, setShowRawXml] = useState(false);
-            const [copyLabel, setCopyLabel] = useState('Copy XML');
-            const [isDragging, setIsDragging] = useState(false);
-            const [isDataMappingOpen, setIsDataMappingOpen] = useState(true);
-            const [isDataModalOpen, setIsDataModalOpen] = useState(false);
-            const [companies, setCompanies] = useState(["Tata Motors (FY 24-25)", "Reliance Retail Ltd", "Infosys Technologies"]);
-            const [selectedCompany, setSelectedCompany] = useState(companies[0]);
-            const [isOrgDropdownOpen, setIsOrgDropdownOpen] = useState(false);
-            const [isAddingCompany, setIsAddingCompany] = useState(false);
-            const [newCompanyName, setNewCompanyName] = useState('');
-            const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
-            const [isAccountMenuOpen, setIsAccountMenuOpen] = useState(false);
 
-            useEffect(() => {
-                const fetchInvoices = async () => {
-                    try {
-                        const token = await getToken();
-                        const response = await fetch('/api/invoices', {
-                            headers: { Authorization: `Bearer ${token}` }
-                        });
-                        const result = await response.json();
-                        if (result.success) {
-                            setInvoices(result.data);
-                        }
-                    } catch (err) {
-                        console.error('Error fetching invoices:', err);
-                    }
-                };
-                fetchInvoices();
-            }, []);
-            const accountMenuRef = useRef(null);
-            const orgDropdownRef = useRef(null);
-            const userMenuRef = useRef(null);
+function App() {
+    const { getToken, isSignedIn } = useAuth();
+    // 1. Reactive State Management (0 hardcoded mock records!)
+    const [invoices, setInvoices] = useState([]);
+    const [selectedIds, setSelectedIds] = useState(new Set());
+    const [activeFilter, setActiveFilter] = useState('all'); // 'all' | 'needs_review' | 'verified'
+    const [searchQuery, setSearchQuery] = useState('');
+    const [errorAlert, setErrorAlert] = useState(null);
+    const [xmlModalData, setXmlModalData] = useState(null);
+    const [showRawXml, setShowRawXml] = useState(false);
+    const [copyLabel, setCopyLabel] = useState('Copy XML');
+    const [isDragging, setIsDragging] = useState(false);
+    const [isDataMappingOpen, setIsDataMappingOpen] = useState(true);
+    const [isDataModalOpen, setIsDataModalOpen] = useState(false);
+    const [companies, setCompanies] = useState(["Tata Motors (FY 24-25)", "Reliance Retail Ltd", "Infosys Technologies"]);
+    const [selectedCompany, setSelectedCompany] = useState(companies[0]);
+    const [isOrgDropdownOpen, setIsOrgDropdownOpen] = useState(false);
+    const [isAddingCompany, setIsAddingCompany] = useState(false);
+    const [newCompanyName, setNewCompanyName] = useState('');
+    const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
+    const [isAccountMenuOpen, setIsAccountMenuOpen] = useState(false);
 
-            // Close dropdowns on click outside
-            useEffect(() => {
-                const handleClickOutside = (e) => {
-                    if (orgDropdownRef.current && !orgDropdownRef.current.contains(e.target)) {
-                        setIsOrgDropdownOpen(false);
-                    }
-                    if (userMenuRef.current && !userMenuRef.current.contains(e.target)) {
-                        setIsUserMenuOpen(false);
-                    }
-                    if (accountMenuRef.current && !accountMenuRef.current.contains(e.target)) {
-                        setIsAccountMenuOpen(false);
-                    }
-                };
-                document.addEventListener('mousedown', handleClickOutside);
-                return () => document.removeEventListener('mousedown', handleClickOutside);
-            }, []);
-
-            // Audit Review View States
-            const [activeReviewInvoice, setActiveReviewInvoice] = useState(null);
-            const [activeHoverSection, setActiveHoverSection] = useState(null);
-
-            const fileInputRef = useRef(null);
-
-            // Handle Company Deletion
-            const handleDeleteCompany = (companyToDelete, e) => {
-                e.stopPropagation();
-                if (companies.length <= 1) return;
-                
-                const updatedCompanies = companies.filter(c => c !== companyToDelete);
-                setCompanies(updatedCompanies);
-                
-                if (selectedCompany === companyToDelete) {
-                    setSelectedCompany(updatedCompanies[0]);
+    useEffect(() => {
+        const fetchInvoices = async () => {
+            if (!isSignedIn) return;
+            try {
+                const token = await getToken();
+                if (!token) {
+                    console.warn("No active auth token available yet.");
+                    return;
                 }
-            };
-
-            // Helper: Safe Number Parsing
-            const safeNum = (val) => parseFloat(val) || 0;
-
-            // Handle active invoice input change
-            const handleInvoiceChange = (field, value) => {
-                if (!activeReviewInvoice) return;
-                
-                const updated = { ...activeReviewInvoice };
-                if (field.includes('.')) {
-                    const [parent, child] = field.split('.');
-                    updated[parent] = { ...updated[parent], [child]: value };
-                } else {
-                    updated[field] = value;
-                }
-                
-                setActiveReviewInvoice(updated);
-                
-                // Also update in the main invoices array so changes persist
-                setInvoices(prev => prev.map(inv => inv.id === updated.id ? updated : inv));
-            };
-
-            const saveVendorRule = async (rawVendor, newLedger, gstin) => {
-                if (!rawVendor || !newLedger) return;
-                try {
-                    const token = await getToken();
-                    await fetch('/api/vendors', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            Authorization: `Bearer ${token}`
-                        },
-                        body: JSON.stringify({
-                            rawVendorName: rawVendor.trim(),
-                            tallyLedgerName: newLedger.trim(),
-                            gstin: (gstin || '').trim()
-                        })
-                    });
-                } catch (err) {
-                    console.error('Failed to persist vendor mapping:', err);
-                }
-            };
-
-            // Helper: Format Rupee Currency
-            const formatINR = (val) => {
-                const num = parseFloat(val || 0);
-                return '₹' + num.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-            };
-
-            // Keyboard Shortcut: Cmd+U / Ctrl+U for upload
-            useEffect(() => {
-                const handleKeyDown = (e) => {
-                    if ((e.ctrlKey || e.metaKey) && (e.key === 'u' || e.key === 'U')) {
-                        e.preventDefault();
-                        if (fileInputRef.current) fileInputRef.current.click();
-                    }
-                };
-                window.addEventListener('keydown', handleKeyDown);
-                return () => window.removeEventListener('keydown', handleKeyDown);
-            }, []);
-
-            // Handle Multi-file Upload and Extraction Pipeline
-            const handleFileUpload = async (files) => {
-                if (!files || files.length === 0) return;
-
-                setErrorAlert(null);
-                const fileArray = Array.from(files);
-
-                // Map files to local Blob URLs for instant high-fidelity image rendering
-                const fileMap = new Map();
-                fileArray.forEach(file => {
-                    fileMap.set(file.name, URL.createObjectURL(file));
-                });
-
-                // Create temp loading rows
-                const tempRows = fileArray.map((file, idx) => ({
-                    id: `temp_${Date.now()}_${idx}`,
-                    fileName: file.name,
-                    fileUrl: fileMap.get(file.name),
-                    fileSize: (file.size / (1024 * 1024)).toFixed(2) + ' MB',
-                    fileType: file.type.includes('pdf') || file.name.endsWith('.pdf') ? 'pdf' : 'image',
-                    vendorName: 'Extracting Metadata...',
-                    gstin: 'Calling Extraction Engine...',
-                    invoiceNumber: 'Processing...',
-                    invoiceDate: '',
-                    taxableAmount: 0,
-                    taxBreakdown: { cgst: 0, sgst: 0, igst: 0 },
-                    totalAmount: 0,
-                    verificationState: 'extracting',
-                    isExtracting: true,
-                    uploadedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-                }));
-
-                // Append temp rows to invoices
-                setInvoices(prev => [...tempRows, ...prev]);
-
-                // Send FormData to Backend API
-                const formData = new FormData();
-                fileArray.forEach(file => {
-                    formData.append('files', file);
-                });
-
-                try {
-                    const token = await getToken();
-                    const response = await fetch('/api/extract-invoice', {
-                        method: 'POST',
-                        headers: { Authorization: `Bearer ${token}` },
-                        body: formData
-                    });
-
-                    const resData = await response.json();
-
-                    if (!response.ok || !resData.success) {
-                        throw new Error(resData.error || 'Failed to extract invoice data from server.');
-                    }
-
-                    const extractedRawList = resData.data || [];
-                    const extractedList = extractedRawList.map((inv, idx) => ({
-                        ...inv,
-                        fileUrl: fileMap.get(inv.fileName) || tempRows[idx]?.fileUrl || null
-                    }));
-
-                    // Replace temp rows with real extracted JSON objects
-                    setInvoices(prev => {
-                        const tempIds = new Set(tempRows.map(t => t.id));
-                        const filtered = prev.filter(item => !tempIds.has(item.id));
-                        return [...extractedList, ...filtered];
-                    });
-
-                    // Automatically select newly extracted invoices
-                    setSelectedIds(prev => {
-                        const next = new Set(prev);
-                        extractedList.forEach(inv => next.add(inv.id));
-                        return next;
-                    });
-
-                } catch (err) {
-                    console.error("Upload error:", err);
-                    setErrorAlert(err.message || 'Error occurred during invoice extraction.');
-
-                    // Remove temp rows on complete failure
-                    setInvoices(prev => {
-                        const tempIds = new Set(tempRows.map(t => t.id));
-                        return prev.filter(item => !tempIds.has(item.id));
-                    });
-                } finally {
-                    if (fileInputRef.current) fileInputRef.current.value = '';
-                }
-            };
-
-            // Selection Handlers
-            const toggleSelectInvoice = (id) => {
-                setSelectedIds(prev => {
-                    const next = new Set(prev);
-                    if (next.has(id)) next.delete(id);
-                    else next.add(id);
-                    return next;
-                });
-            };
-
-            const toggleSelectAll = () => {
-                if (selectedIds.size === filteredInvoices.length && filteredInvoices.length > 0) {
-                    setSelectedIds(new Set());
-                } else {
-                    const next = new Set(filteredInvoices.map(i => i.id));
-                    setSelectedIds(next);
-                }
-            };
-
-            // Delete Handlers
-            const deleteInvoice = (id) => {
-                setInvoices(prev => prev.filter(i => i.id !== id));
-                setSelectedIds(prev => {
-                    const next = new Set(prev);
-                    next.delete(id);
-                    return next;
-                });
-                if (activeReviewInvoice && activeReviewInvoice.id === id) {
-                    setActiveReviewInvoice(null);
-                }
-            };
-
-            const deleteSelected = () => {
-                setInvoices(prev => prev.filter(i => !selectedIds.has(i.id)));
-                setSelectedIds(new Set());
-                if (activeReviewInvoice && selectedIds.has(activeReviewInvoice.id)) {
-                    setActiveReviewInvoice(null);
-                }
-            };
-
-            // Computed Dynamic UI Metrics (100% derived from React State)
-            const totalInvoicesCount = invoices.length;
-            const verifiedCount = useMemo(() => invoices.filter(i => i.verificationState === 'verified').length, [invoices]);
-            const needsReviewCount = useMemo(() => invoices.filter(i => i.verificationState === 'needs_review' || i.verificationState === 'math_error').length, [invoices]);
-            const extractingCount = useMemo(() => invoices.filter(i => i.verificationState === 'extracting').length, [invoices]);
-
-            // HSN / GSTIN Validation Rate
-            const hsnValidationRate = useMemo(() => {
-                const totalProcessed = totalInvoicesCount - extractingCount;
-                if (totalProcessed <= 0) return 0;
-                return Math.round((verifiedCount / totalProcessed) * 100);
-            }, [totalInvoicesCount, extractingCount, verifiedCount]);
-
-            // Total Tax Detected (sum of cgst + sgst + igst)
-            const totalTaxDetected = useMemo(() => {
-                return invoices.reduce((sum, inv) => {
-                    if (inv.verificationState === 'extracting') return sum;
-                    const tax = (inv.taxBreakdown?.cgst || 0) + (inv.taxBreakdown?.sgst || 0) + (inv.taxBreakdown?.igst || 0);
-                    return sum + tax;
-                }, 0);
-            }, [invoices]);
-
-            // Total Invoice Value
-            const totalValueProcessed = useMemo(() => {
-                return invoices.reduce((sum, inv) => sum + (inv.totalAmount || 0), 0);
-            }, [invoices]);
-
-            // Filtered Invoices List
-            const filteredInvoices = useMemo(() => {
-                return invoices.filter(inv => {
-                    // Filter tab check
-                    if (activeFilter === 'needs_review' && !(inv.verificationState === 'needs_review' || inv.verificationState === 'math_error')) {
-                        return false;
-                    }
-                    if (activeFilter === 'verified' && inv.verificationState !== 'verified') {
-                        return false;
-                    }
-                    // Search query check
-                    if (searchQuery.trim() !== '') {
-                        const q = searchQuery.toLowerCase();
-                        const vendor = (inv.vendorName || '').toLowerCase();
-                        const invNo = (inv.invoiceNumber || '').toLowerCase();
-                        const gstin = (inv.gstin || '').toLowerCase();
-                        const file = (inv.fileName || '').toLowerCase();
-                        return vendor.includes(q) || invNo.includes(q) || gstin.includes(q) || file.includes(q);
-                    }
-                    return true;
-                });
-            }, [invoices, activeFilter, searchQuery]);
-
-            // Financial Dock Computations for Selected Invoices
-            const selectedInvoices = useMemo(() => {
-                return invoices.filter(i => selectedIds.has(i.id) && i.verificationState !== 'extracting');
-            }, [invoices, selectedIds]);
-
-            const selectedTaxableSum = useMemo(() => selectedInvoices.reduce((sum, i) => sum + (i.taxableAmount || 0), 0), [selectedInvoices]);
-            const selectedCgstSum = useMemo(() => selectedInvoices.reduce((sum, i) => sum + (i.taxBreakdown?.cgst || 0), 0), [selectedInvoices]);
-            const selectedSgstSum = useMemo(() => selectedInvoices.reduce((sum, i) => sum + (i.taxBreakdown?.sgst || 0), 0), [selectedInvoices]);
-            const selectedIgstSum = useMemo(() => selectedInvoices.reduce((sum, i) => sum + (i.taxBreakdown?.igst || 0), 0), [selectedInvoices]);
-            const selectedTotalTaxSum = useMemo(() => selectedCgstSum + selectedSgstSum + selectedIgstSum, [selectedInvoices]);
-            const selectedNetTotalSum = useMemo(() => selectedInvoices.reduce((sum, i) => sum + (i.totalAmount || 0), 0), [selectedInvoices]);
-
-            const selectedVerifiedCount = useMemo(() => selectedInvoices.filter(i => i.verificationState === 'verified').length, [selectedInvoices]);
-            const selectedReviewCount = useMemo(() => selectedInvoices.filter(i => i.verificationState === 'needs_review' || i.verificationState === 'math_error').length, [selectedInvoices]);
-
-            const unmappedVendors = useMemo(() => {
-                const uniqueUnmapped = new Set();
-                selectedInvoices.forEach(inv => {
-                    if (!inv.tallyLedgerName || inv.tallyLedgerName === 'Sundry Creditors' || inv.tallyLedgerName === `${inv.vendorName} Ledger`) {
-                        if (inv.vendorName && inv.vendorName !== 'Extraction Failed') {
-                            uniqueUnmapped.add(inv.vendorName);
-                        }
+                const response = await fetch('http://localhost:5000/api/invoices', {
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'Content-Type': 'application/json'
                     }
                 });
-                return Array.from(uniqueUnmapped);
-            }, [selectedInvoices]);
+                const result = await response.json();
+                if (result.success) {
+                    setInvoices(result.data);
+                }
+            } catch (err) {
+                console.error('Error fetching invoices:', err);
+            }
+        };
+        if (isSignedIn) {
+            fetchInvoices();
+        }
+    }, [getToken, isSignedIn]);
+    const accountMenuRef = useRef(null);
+    const orgDropdownRef = useRef(null);
+    const userMenuRef = useRef(null);
 
-            // Drag & Drop Handlers
-            const handleDragOver = (e) => {
+    // Close dropdowns on click outside
+    useEffect(() => {
+        const handleClickOutside = (e) => {
+            if (orgDropdownRef.current && !orgDropdownRef.current.contains(e.target)) {
+                setIsOrgDropdownOpen(false);
+            }
+            if (userMenuRef.current && !userMenuRef.current.contains(e.target)) {
+                setIsUserMenuOpen(false);
+            }
+            if (accountMenuRef.current && !accountMenuRef.current.contains(e.target)) {
+                setIsAccountMenuOpen(false);
+            }
+        };
+        document.addEventListener('mousedown', handleClickOutside);
+        return () => document.removeEventListener('mousedown', handleClickOutside);
+    }, []);
+
+    // Audit Review View States
+    const [activeReviewInvoice, setActiveReviewInvoice] = useState(null);
+    const [activeHoverSection, setActiveHoverSection] = useState(null);
+
+    const fileInputRef = useRef(null);
+
+    // Handle Company Deletion
+    const handleDeleteCompany = (companyToDelete, e) => {
+        e.stopPropagation();
+        if (companies.length <= 1) return;
+
+        const updatedCompanies = companies.filter(c => c !== companyToDelete);
+        setCompanies(updatedCompanies);
+
+        if (selectedCompany === companyToDelete) {
+            setSelectedCompany(updatedCompanies[0]);
+        }
+    };
+
+    // Helper: Safe Number Parsing
+    const safeNum = (val) => parseFloat(val) || 0;
+
+    // Handle active invoice input change
+    const handleInvoiceChange = (field, value) => {
+        if (!activeReviewInvoice) return;
+
+        const updated = { ...activeReviewInvoice };
+        if (field.includes('.')) {
+            const [parent, child] = field.split('.');
+            updated[parent] = { ...updated[parent], [child]: value };
+        } else {
+            updated[field] = value;
+        }
+
+        setActiveReviewInvoice(updated);
+
+        // Also update in the main invoices array so changes persist
+        setInvoices(prev => prev.map(inv => inv.id === updated.id ? updated : inv));
+    };
+
+    const saveVendorRule = async (rawVendor, newLedger, gstin) => {
+        if (!rawVendor || !newLedger) return;
+        try {
+            const token = await getToken();
+            await fetch('http://localhost:5000/api/vendors', {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    rawVendorName: rawVendor.trim(),
+                    tallyLedgerName: newLedger.trim(),
+                    gstin: (gstin || '').trim()
+                })
+            });
+        } catch (err) {
+            console.error('Failed to persist vendor mapping:', err);
+        }
+    };
+
+    // Helper: Format Rupee Currency
+    const formatINR = (val) => {
+        const num = parseFloat(val || 0);
+        return '₹' + num.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    };
+
+    // Keyboard Shortcut: Cmd+U / Ctrl+U for upload
+    useEffect(() => {
+        const handleKeyDown = (e) => {
+            if ((e.ctrlKey || e.metaKey) && (e.key === 'u' || e.key === 'U')) {
                 e.preventDefault();
-                setIsDragging(true);
-            };
+                if (fileInputRef.current) fileInputRef.current.click();
+            }
+        };
+        window.addEventListener('keydown', handleKeyDown);
+        return () => window.removeEventListener('keydown', handleKeyDown);
+    }, []);
 
-            const handleDragLeave = (e) => {
-                e.preventDefault();
-                setIsDragging(false);
-            };
+    // Handle Multi-file Upload and Extraction Pipeline
+    const handleFileUpload = async (files) => {
+        if (!files || files.length === 0) return;
 
-            const handleDrop = (e) => {
-                e.preventDefault();
-                setIsDragging(false);
-                if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-                    handleFileUpload(e.dataTransfer.files);
+        setErrorAlert(null);
+
+        if (!isSignedIn) {
+            setErrorAlert("You must be signed in to upload invoices.");
+            return;
+        }
+        const token = await getToken();
+        if (!token) {
+            setErrorAlert("Authentication session expired. Please sign in again.");
+            return;
+        }
+
+        const fileArray = Array.from(files);
+
+        // Map files to local Blob URLs for instant high-fidelity image rendering
+        const fileMap = new Map();
+        fileArray.forEach(file => {
+            fileMap.set(file.name, URL.createObjectURL(file));
+        });
+
+        // Create temp loading rows
+        const tempRows = fileArray.map((file, idx) => ({
+            id: `temp_${Date.now()}_${idx}`,
+            fileName: file.name,
+            fileUrl: fileMap.get(file.name),
+            fileSize: (file.size / (1024 * 1024)).toFixed(2) + ' MB',
+            fileType: file.type.includes('pdf') || file.name.endsWith('.pdf') ? 'pdf' : 'image',
+            vendorName: 'Extracting Metadata...',
+            gstin: 'Calling Extraction Engine...',
+            invoiceNumber: 'Processing...',
+            invoiceDate: '',
+            taxableAmount: 0,
+            taxBreakdown: { cgst: 0, sgst: 0, igst: 0 },
+            totalAmount: 0,
+            verificationState: 'extracting',
+            isExtracting: true,
+            uploadedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        }));
+
+        // Append temp rows to invoices
+        setInvoices(prev => [...tempRows, ...prev]);
+
+        // Send FormData to Backend API
+        const formData = new FormData();
+        fileArray.forEach(file => {
+            formData.append('files', file);
+        });
+
+        try {
+            const response = await fetch('http://localhost:5000/api/extract-invoice', {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${token}`
+                },
+                body: formData
+            });
+
+            const resData = await response.json();
+
+            if (!response.ok || !resData.success) {
+                throw new Error(resData.error || 'Failed to extract invoice data from server.');
+            }
+
+            const extractedRawList = resData.data || [];
+            const extractedList = extractedRawList.map((inv, idx) => ({
+                ...inv,
+                fileUrl: fileMap.get(inv.fileName) || tempRows[idx]?.fileUrl || null
+            }));
+
+            // Replace temp rows with real extracted JSON objects
+            setInvoices(prev => {
+                const tempIds = new Set(tempRows.map(t => t.id));
+                const filtered = prev.filter(item => !tempIds.has(item.id));
+                return [...extractedList, ...filtered];
+            });
+
+            // Automatically select newly extracted invoices
+            setSelectedIds(prev => {
+                const next = new Set(prev);
+                extractedList.forEach(inv => next.add(inv.id));
+                return next;
+            });
+
+        } catch (err) {
+            console.error("Upload error:", err);
+            setErrorAlert(err.message || 'Error occurred during invoice extraction.');
+
+            // Remove temp rows on complete failure
+            setInvoices(prev => {
+                const tempIds = new Set(tempRows.map(t => t.id));
+                return prev.filter(item => !tempIds.has(item.id));
+            });
+        } finally {
+            if (fileInputRef.current) fileInputRef.current.value = '';
+        }
+    };
+
+    // Selection Handlers
+    const toggleSelectInvoice = (id) => {
+        setSelectedIds(prev => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id);
+            else next.add(id);
+            return next;
+        });
+    };
+
+    const toggleSelectAll = () => {
+        if (selectedIds.size === filteredInvoices.length && filteredInvoices.length > 0) {
+            setSelectedIds(new Set());
+        } else {
+            const next = new Set(filteredInvoices.map(i => i.id));
+            setSelectedIds(next);
+        }
+    };
+
+    // Delete Handlers
+    const deleteInvoice = (id) => {
+        setInvoices(prev => prev.filter(i => i.id !== id));
+        setSelectedIds(prev => {
+            const next = new Set(prev);
+            next.delete(id);
+            return next;
+        });
+        if (activeReviewInvoice && activeReviewInvoice.id === id) {
+            setActiveReviewInvoice(null);
+        }
+    };
+
+    const deleteSelected = () => {
+        setInvoices(prev => prev.filter(i => !selectedIds.has(i.id)));
+        setSelectedIds(new Set());
+        if (activeReviewInvoice && selectedIds.has(activeReviewInvoice.id)) {
+            setActiveReviewInvoice(null);
+        }
+    };
+
+    // Computed Dynamic UI Metrics (100% derived from React State)
+    const totalInvoicesCount = invoices.length;
+    const verifiedCount = useMemo(() => invoices.filter(i => i.verificationState === 'verified').length, [invoices]);
+    const needsReviewCount = useMemo(() => invoices.filter(i => i.verificationState === 'needs_review' || i.verificationState === 'math_error').length, [invoices]);
+    const extractingCount = useMemo(() => invoices.filter(i => i.verificationState === 'extracting').length, [invoices]);
+
+    // HSN / GSTIN Validation Rate
+    const hsnValidationRate = useMemo(() => {
+        const totalProcessed = totalInvoicesCount - extractingCount;
+        if (totalProcessed <= 0) return 0;
+        return Math.round((verifiedCount / totalProcessed) * 100);
+    }, [totalInvoicesCount, extractingCount, verifiedCount]);
+
+    // Total Tax Detected (sum of cgst + sgst + igst)
+    const totalTaxDetected = useMemo(() => {
+        return invoices.reduce((sum, inv) => {
+            if (inv.verificationState === 'extracting') return sum;
+            const tax = (inv.taxBreakdown?.cgst || 0) + (inv.taxBreakdown?.sgst || 0) + (inv.taxBreakdown?.igst || 0);
+            return sum + tax;
+        }, 0);
+    }, [invoices]);
+
+    // Total Invoice Value
+    const totalValueProcessed = useMemo(() => {
+        return invoices.reduce((sum, inv) => sum + (inv.totalAmount || 0), 0);
+    }, [invoices]);
+
+    // Filtered Invoices List
+    const filteredInvoices = useMemo(() => {
+        return invoices.filter(inv => {
+            // Filter tab check
+            if (activeFilter === 'needs_review' && !(inv.verificationState === 'needs_review' || inv.verificationState === 'math_error')) {
+                return false;
+            }
+            if (activeFilter === 'verified' && inv.verificationState !== 'verified') {
+                return false;
+            }
+            // Search query check
+            if (searchQuery.trim() !== '') {
+                const q = searchQuery.toLowerCase();
+                const vendor = (inv.vendorName || '').toLowerCase();
+                const invNo = (inv.invoiceNumber || '').toLowerCase();
+                const gstin = (inv.gstin || '').toLowerCase();
+                const file = (inv.fileName || '').toLowerCase();
+                return vendor.includes(q) || invNo.includes(q) || gstin.includes(q) || file.includes(q);
+            }
+            return true;
+        });
+    }, [invoices, activeFilter, searchQuery]);
+
+    // Financial Dock Computations for Selected Invoices
+    const selectedInvoices = useMemo(() => {
+        return invoices.filter(i => selectedIds.has(i.id) && i.verificationState !== 'extracting');
+    }, [invoices, selectedIds]);
+
+    const selectedTaxableSum = useMemo(() => selectedInvoices.reduce((sum, i) => sum + (i.taxableAmount || 0), 0), [selectedInvoices]);
+    const selectedCgstSum = useMemo(() => selectedInvoices.reduce((sum, i) => sum + (i.taxBreakdown?.cgst || 0), 0), [selectedInvoices]);
+    const selectedSgstSum = useMemo(() => selectedInvoices.reduce((sum, i) => sum + (i.taxBreakdown?.sgst || 0), 0), [selectedInvoices]);
+    const selectedIgstSum = useMemo(() => selectedInvoices.reduce((sum, i) => sum + (i.taxBreakdown?.igst || 0), 0), [selectedInvoices]);
+    const selectedTotalTaxSum = useMemo(() => selectedCgstSum + selectedSgstSum + selectedIgstSum, [selectedInvoices]);
+    const selectedNetTotalSum = useMemo(() => selectedInvoices.reduce((sum, i) => sum + (i.totalAmount || 0), 0), [selectedInvoices]);
+
+    const selectedVerifiedCount = useMemo(() => selectedInvoices.filter(i => i.verificationState === 'verified').length, [selectedInvoices]);
+    const selectedReviewCount = useMemo(() => selectedInvoices.filter(i => i.verificationState === 'needs_review' || i.verificationState === 'math_error').length, [selectedInvoices]);
+
+    const unmappedVendors = useMemo(() => {
+        const uniqueUnmapped = new Set();
+        selectedInvoices.forEach(inv => {
+            if (!inv.tallyLedgerName || inv.tallyLedgerName === 'Sundry Creditors' || inv.tallyLedgerName === `${inv.vendorName} Ledger`) {
+                if (inv.vendorName && inv.vendorName !== 'Extraction Failed') {
+                    uniqueUnmapped.add(inv.vendorName);
                 }
-            };
+            }
+        });
+        return Array.from(uniqueUnmapped);
+    }, [selectedInvoices]);
 
-            // Copy & Download XML Modal
-            const handleCopyXml = () => {
-                if (!xmlModalData?.xml) return;
-                navigator.clipboard.writeText(xmlModalData.xml).then(() => {
-                    setCopyLabel('Copied!');
-                    setTimeout(() => setCopyLabel('Copy XML'), 2000);
-                });
-            };
+    // Drag & Drop Handlers
+    const handleDragOver = (e) => {
+        e.preventDefault();
+        setIsDragging(true);
+    };
 
-            const handleDownloadXml = () => {
-                if (!xmlModalData?.xml) return;
-                const blob = new Blob([xmlModalData.xml], { type: 'application/xml' });
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = `tally_voucher_${xmlModalData.invNo || 'invoice'}.xml`;
-                a.click();
-                URL.revokeObjectURL(url);
-            };
+    const handleDragLeave = (e) => {
+        e.preventDefault();
+        setIsDragging(false);
+    };
 
-            // Phase 3 Math Calculations for Audit Review
-            const computedTotalTax = activeReviewInvoice ? safeNum(activeReviewInvoice.taxBreakdown?.cgst) + safeNum(activeReviewInvoice.taxBreakdown?.sgst) + safeNum(activeReviewInvoice.taxBreakdown?.igst) : 0;
-            const computedNetTotal = activeReviewInvoice ? safeNum(activeReviewInvoice.taxableAmount) + computedTotalTax + safeNum(activeReviewInvoice.roundoffAmount) : 0;
+    const handleDrop = (e) => {
+        e.preventDefault();
+        setIsDragging(false);
+        if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+            handleFileUpload(e.dataTransfer.files);
+        }
+    };
 
-            return (
-                <React.Fragment>
-                    <SignedIn>
-                        <div className="min-h-screen bg-slate-50/70 text-slate-800 font-sans antialiased flex flex-col">
+    // Copy & Download XML Modal
+    const handleCopyXml = () => {
+        if (!xmlModalData?.xml) return;
+        navigator.clipboard.writeText(xmlModalData.xml).then(() => {
+            setCopyLabel('Copied!');
+            setTimeout(() => setCopyLabel('Copy XML'), 2000);
+        });
+    };
+
+    const handleDownloadXml = () => {
+        if (!xmlModalData?.xml) return;
+        const blob = new Blob([xmlModalData.xml], { type: 'application/xml' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `tally_voucher_${xmlModalData.invNo || 'invoice'}.xml`;
+        a.click();
+        URL.revokeObjectURL(url);
+    };
+
+    // Phase 3 Math Calculations for Audit Review
+    const computedTotalTax = activeReviewInvoice ? safeNum(activeReviewInvoice.taxBreakdown?.cgst) + safeNum(activeReviewInvoice.taxBreakdown?.sgst) + safeNum(activeReviewInvoice.taxBreakdown?.igst) : 0;
+    const computedNetTotal = activeReviewInvoice ? safeNum(activeReviewInvoice.taxableAmount) + computedTotalTax + safeNum(activeReviewInvoice.roundoffAmount) : 0;
+
+    return (
+        <React.Fragment>
+            <SignedIn>
+                <div className="min-h-screen bg-slate-50/70 text-slate-800 font-sans antialiased flex flex-col">
 
                     {/* TOP GLOBAL HEADER */}
                     <header className="fixed top-0 left-0 right-0 h-14 bg-white/95 backdrop-blur border-b border-slate-200/80 z-50 px-4 flex items-center justify-between shadow-2xs">
@@ -456,7 +478,7 @@ import { SignedIn, SignedOut, SignIn, UserButton, useAuth } from "@clerk/clerk-r
                                                 <span className="truncate pr-2">{comp}</span>
                                                 <div className="flex items-center gap-1.5 shrink-0">
                                                     {selectedCompany === comp && <span className="material-symbols-outlined text-[14px] text-blue-600">check</span>}
-                                                    <div 
+                                                    <div
                                                         onClick={(e) => handleDeleteCompany(comp, e)}
                                                         className="text-slate-400 hover:text-rose-500 p-0.5 rounded transition-colors flex items-center justify-center cursor-pointer"
                                                         title="Delete company"
@@ -469,11 +491,11 @@ import { SignedIn, SignedOut, SignIn, UserButton, useAuth } from "@clerk/clerk-r
                                         <div className="border-t border-slate-100 mt-1">
                                             {isAddingCompany ? (
                                                 <div className="px-3 py-2 flex items-center gap-2">
-                                                    <input 
-                                                        type="text" 
-                                                        autoFocus 
-                                                        className="text-sm px-2 py-1 w-full border-b border-blue-500 bg-slate-50 focus:outline-none text-slate-700" 
-                                                        placeholder="Enter company name..." 
+                                                    <input
+                                                        type="text"
+                                                        autoFocus
+                                                        className="text-sm px-2 py-1 w-full border-b border-blue-500 bg-slate-50 focus:outline-none text-slate-700"
+                                                        placeholder="Enter company name..."
                                                         value={newCompanyName}
                                                         onChange={(e) => setNewCompanyName(e.target.value)}
                                                         onKeyDown={(e) => {
@@ -491,8 +513,8 @@ import { SignedIn, SignedOut, SignIn, UserButton, useAuth } from "@clerk/clerk-r
                                                             }
                                                         }}
                                                     />
-                                                    <button 
-                                                        type="button" 
+                                                    <button
+                                                        type="button"
                                                         className="text-slate-400 hover:text-slate-600 p-1 flex items-center justify-center"
                                                         onClick={(e) => { e.stopPropagation(); setIsAddingCompany(false); setNewCompanyName(''); }}
                                                     >
@@ -554,7 +576,7 @@ import { SignedIn, SignedOut, SignIn, UserButton, useAuth } from "@clerk/clerk-r
                                         expand_more
                                     </span>
                                 </button>
-                                
+
                                 {isDataMappingOpen && (
                                     <div className="mt-1 space-y-0.5 pl-1 border-l border-slate-200/60 ml-2">
                                         <a href="#" className="flex items-center gap-2 px-2.5 py-1.5 rounded-md text-[13px] font-medium text-slate-500 hover:text-slate-900 hover:bg-slate-100/60 transition-colors group">
@@ -595,7 +617,7 @@ import { SignedIn, SignedOut, SignIn, UserButton, useAuth } from "@clerk/clerk-r
                         {/* DYNAMIC AUDIT REVIEW SPLIT-SCREEN VIEW */}
                         {activeReviewInvoice ? (
                             <div className="w-full pb-24 bg-slate-50/70 min-h-[calc(100vh-3.5rem)] flex flex-col">
-                                
+
                                 {/* Audit Review Top Bar */}
                                 <div className="bg-white border-b border-slate-200/80 px-5 py-3 flex items-center justify-between shadow-2xs sticky top-14 z-30">
                                     <div className="flex items-center gap-3">
@@ -668,7 +690,7 @@ import { SignedIn, SignedOut, SignIn, UserButton, useAuth } from "@clerk/clerk-r
 
                                 {/* Split Screen Main Body */}
                                 <div className="flex flex-col lg:flex-row gap-5 p-5">
-                                    
+
                                     {/* LEFT COLUMN: Document Viewer with Hover Bounding Box Overlay */}
                                     <div className="w-full lg:w-[45%] flex flex-col gap-3 sticky top-28 self-start">
                                         <div className="bg-white border border-slate-200/80 rounded-xl p-4 shadow-xs flex flex-col items-center justify-center relative overflow-hidden">
@@ -759,16 +781,15 @@ import { SignedIn, SignedOut, SignIn, UserButton, useAuth } from "@clerk/clerk-r
 
                                     {/* RIGHT COLUMN: Interactive Data Audit Panel */}
                                     <div className="w-full lg:w-[55%] space-y-4">
-                                        
+
                                         {/* Section A: Supplier Identification */}
                                         <div
                                             onMouseEnter={() => setActiveHoverSection('supplier')}
                                             onMouseLeave={() => setActiveHoverSection(null)}
-                                            className={`p-4 rounded-xl border transition-all cursor-pointer ${
-                                                activeHoverSection === 'supplier'
+                                            className={`p-4 rounded-xl border transition-all cursor-pointer ${activeHoverSection === 'supplier'
                                                     ? 'bg-blue-50/60 border-blue-300 shadow-md ring-2 ring-blue-400/30'
                                                     : 'bg-white border-slate-200/80 shadow-xs hover:border-slate-300'
-                                            }`}
+                                                }`}
                                         >
                                             <div className="flex items-center justify-between mb-3">
                                                 <div className="flex items-center gap-2">
@@ -815,11 +836,10 @@ import { SignedIn, SignedOut, SignIn, UserButton, useAuth } from "@clerk/clerk-r
                                         <div
                                             onMouseEnter={() => setActiveHoverSection('metadata')}
                                             onMouseLeave={() => setActiveHoverSection(null)}
-                                            className={`p-4 rounded-xl border transition-all cursor-pointer ${
-                                                activeHoverSection === 'metadata'
+                                            className={`p-4 rounded-xl border transition-all cursor-pointer ${activeHoverSection === 'metadata'
                                                     ? 'bg-indigo-50/60 border-indigo-300 shadow-md ring-2 ring-indigo-400/30'
                                                     : 'bg-white border-slate-200/80 shadow-xs hover:border-slate-300'
-                                            }`}
+                                                }`}
                                         >
                                             <div className="flex items-center justify-between mb-3">
                                                 <div className="flex items-center gap-2">
@@ -855,11 +875,10 @@ import { SignedIn, SignedOut, SignIn, UserButton, useAuth } from "@clerk/clerk-r
                                         <div
                                             onMouseEnter={() => setActiveHoverSection('line_items')}
                                             onMouseLeave={() => setActiveHoverSection(null)}
-                                            className={`p-4 rounded-xl border transition-all cursor-pointer ${
-                                                activeHoverSection === 'line_items'
+                                            className={`p-4 rounded-xl border transition-all cursor-pointer ${activeHoverSection === 'line_items'
                                                     ? 'bg-emerald-50/60 border-emerald-300 shadow-md ring-2 ring-emerald-400/30'
                                                     : 'bg-white border-slate-200/80 shadow-xs hover:border-slate-300'
-                                            }`}
+                                                }`}
                                         >
                                             <div className="flex items-center justify-between mb-3">
                                                 <div className="flex items-center gap-2">
@@ -907,11 +926,10 @@ import { SignedIn, SignedOut, SignIn, UserButton, useAuth } from "@clerk/clerk-r
                                         <div
                                             onMouseEnter={() => setActiveHoverSection('tax')}
                                             onMouseLeave={() => setActiveHoverSection(null)}
-                                            className={`p-4 rounded-xl border transition-all cursor-pointer ${
-                                                activeHoverSection === 'tax'
+                                            className={`p-4 rounded-xl border transition-all cursor-pointer ${activeHoverSection === 'tax'
                                                     ? 'bg-amber-50/60 border-amber-300 shadow-md ring-2 ring-amber-400/30'
                                                     : 'bg-white border-slate-200/80 shadow-xs hover:border-slate-300'
-                                            }`}
+                                                }`}
                                         >
                                             <div className="flex items-center justify-between mb-3">
                                                 <div className="flex items-center gap-2">
@@ -1106,10 +1124,10 @@ import { SignedIn, SignedOut, SignIn, UserButton, useAuth } from "@clerk/clerk-r
 
                                         {/* BOTTOM SECTION: Processing Queue Data Table */}
                                         <section aria-label="Invoice Processing Queue" className="bg-white border border-slate-200/80 rounded-xl shadow-xs flex flex-col overflow-hidden">
-                                            
+
                                             {/* Table Filter and Header Actions */}
                                             <div className="px-4 py-3 border-b border-slate-200/80 flex flex-col md:flex-row md:items-center justify-between gap-3 bg-white">
-                                                
+
                                                 {/* Queue Filter Tabs (Fully Dynamic Computations) */}
                                                 <div className="flex items-center gap-3 flex-1 min-w-0">
                                                     <div className="flex items-center gap-2">
@@ -1213,7 +1231,7 @@ import { SignedIn, SignedOut, SignIn, UserButton, useAuth } from "@clerk/clerk-r
                                                         </tr>
                                                     </thead>
                                                     <tbody className="divide-y divide-slate-100 text-xs">
-                                                        
+
                                                         {/* EMPTY STATE TABLE SKELETON */}
                                                         {filteredInvoices.length === 0 && (
                                                             <tr>
@@ -1330,11 +1348,10 @@ import { SignedIn, SignedOut, SignIn, UserButton, useAuth } from "@clerk/clerk-r
                                                                                 type="button"
                                                                                 onClick={() => setActiveReviewInvoice(inv)}
                                                                                 disabled={inv.verificationState === 'extracting'}
-                                                                                className={`px-2.5 py-1 rounded-md text-[11px] font-semibold inline-flex items-center gap-1 transition-colors ${
-                                                                                    inv.verificationState === 'extracting'
+                                                                                className={`px-2.5 py-1 rounded-md text-[11px] font-semibold inline-flex items-center gap-1 transition-colors ${inv.verificationState === 'extracting'
                                                                                         ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
                                                                                         : 'bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200/80 shadow-2xs'
-                                                                                }`}
+                                                                                    }`}
                                                                             >
                                                                                 <span className="material-symbols-outlined text-[14px]">visibility</span>
                                                                                 <span>Review</span>
@@ -1360,7 +1377,7 @@ import { SignedIn, SignedOut, SignIn, UserButton, useAuth } from "@clerk/clerk-r
 
                                         {/* Dynamic KPI Metric Cards */}
                                         <section className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                                            
+
                                             {/* HSN / GSTIN Validation Rate */}
                                             <div className="border border-slate-200/80 rounded-xl bg-white p-3.5 shadow-xs flex items-start justify-between">
                                                 <div className="space-y-1">
@@ -1516,7 +1533,7 @@ import { SignedIn, SignedOut, SignIn, UserButton, useAuth } from "@clerk/clerk-r
                     {xmlModalData && (
                         <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4">
                             <div className="bg-white border border-slate-200 shadow-2xl rounded-2xl p-6 max-w-2xl w-full text-slate-800 space-y-5 flex flex-col max-h-[90vh]">
-                                
+
                                 {/* Header Bar */}
                                 <div className="flex items-center justify-between">
                                     <span className="flex items-center gap-2 text-xs font-semibold text-slate-500 uppercase tracking-wider">
@@ -1694,27 +1711,27 @@ import { SignedIn, SignedOut, SignIn, UserButton, useAuth } from "@clerk/clerk-r
                         </div>
                     )}
                 </div>
-                    </SignedIn>
-                    <SignedOut>
-                        <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-4 select-none font-sans">
-                            <div className="mb-6 text-center">
-                                <div className="inline-flex items-center justify-center w-12 h-12 rounded-2xl bg-slate-900 text-white mb-3 shadow-md">
-                                    <svg className="w-6 h-6 text-blue-400 fill-current" viewBox="0 0 24 24">
-                                        <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
-                                    </svg>
-                                </div>
-                                <h1 className="font-heading text-xl font-bold text-slate-900 tracking-tight">TallyFlow AI</h1>
-                                <p className="text-xs text-slate-500 mt-1">Enterprise GST Invoice Automator & B2B Workspace</p>
-                            </div>
-                            <div className="w-full max-w-sm bg-white border border-slate-200 rounded-2xl p-6 shadow-md flex flex-col items-center space-y-4">
-                                <SignIn routing="hash" />
-                            </div>
+            </SignedIn>
+            <SignedOut>
+                <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-4 select-none font-sans">
+                    <div className="mb-6 text-center">
+                        <div className="inline-flex items-center justify-center w-12 h-12 rounded-2xl bg-slate-900 text-white mb-3 shadow-md">
+                            <svg className="w-6 h-6 text-blue-400 fill-current" viewBox="0 0 24 24">
+                                <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
+                            </svg>
                         </div>
-                    </SignedOut>
-                </React.Fragment>
-            );
-        }
+                        <h1 className="font-heading text-xl font-bold text-slate-900 tracking-tight">TallyFlow AI</h1>
+                        <p className="text-xs text-slate-500 mt-1">Enterprise GST Invoice Automator & B2B Workspace</p>
+                    </div>
+                    <div className="w-full max-w-sm bg-white border border-slate-200 rounded-2xl p-6 shadow-md flex flex-col items-center space-y-4">
+                        <SignIn routing="hash" />
+                    </div>
+                </div>
+            </SignedOut>
+        </React.Fragment>
+    );
+}
 
 
-    
+
 export default App;
