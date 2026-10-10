@@ -170,6 +170,11 @@ function generateTallyXml(data, options = { safeEduMode: true }) {
         invoice_date = '',
         vendor_name = 'Vendor Ledger',
         gstin = '',
+        supplier_address = '',
+        supplier_state = '',
+        buyer_order_no = '',
+        supplier_ref = '',
+        vehicle_number = '',
         taxable_amount = 0,
         cgst_amount = 0,
         sgst_amount = 0,
@@ -180,7 +185,8 @@ function generateTallyXml(data, options = { safeEduMode: true }) {
         cgst_ledger = 'Input CGST',
         sgst_ledger = 'Input SGST',
         igst_ledger = 'Input IGST',
-        roundoff_ledger = 'Round Off'
+        roundoff_ledger = 'Round Off',
+        items = []
     } = data;
 
     let dateFormatted = '';
@@ -189,7 +195,7 @@ function generateTallyXml(data, options = { safeEduMode: true }) {
         if (!isNaN(d.getTime())) {
             const year = d.getFullYear();
             const month = String(d.getMonth() + 1).padStart(2, '0');
-            const day = options.safeEduMode ? '01' : String(d.getDate()).padStart(2, '0');
+            const day = String(d.getDate()).padStart(2, '0');
             dateFormatted = `${year}${month}${day}`;
         }
     }
@@ -226,6 +232,14 @@ function generateTallyXml(data, options = { safeEduMode: true }) {
     if (gstin) {
         xml += `            <PARTYGSTIN>${escapeXml(gstin)}</PARTYGSTIN>\n`;
     }
+    if (supplier_address) {
+        xml += `            <ADDRESS.LIST>\n`;
+        xml += `              <ADDRESS>${escapeXml(supplier_address)}</ADDRESS>\n`;
+        xml += `            </ADDRESS.LIST>\n`;
+    }
+    if (supplier_state) {
+        xml += `            <STATENAME>${escapeXml(supplier_state)}</STATENAME>\n`;
+    }
     xml += `          </LEDGER>\n`;
     xml += `        </TALLYMESSAGE>\n`;
 
@@ -236,7 +250,20 @@ function generateTallyXml(data, options = { safeEduMode: true }) {
     xml += `            <VOUCHERNUMBER>${escapeXml(invNo)}</VOUCHERNUMBER>\n`;
     xml += `            <REFERENCE>${escapeXml(invNo)}</REFERENCE>\n`;
     xml += `            <PARTYLEDGERNAME>${escapeXml(cleanVendor)}</PARTYLEDGERNAME>\n`;
-    xml += `            <PERSISTEDVIEW>Accounting Voucher View</PERSISTEDVIEW>\n`;
+    if (items && items.length > 0) {
+        xml += `            <PERSISTEDVIEW>Invoice Voucher View</PERSISTEDVIEW>\n`;
+    } else {
+        xml += `            <PERSISTEDVIEW>Accounting Voucher View</PERSISTEDVIEW>\n`;
+    }
+    if (buyer_order_no) {
+        xml += `            <BASICBUYERORDERNO>${escapeXml(buyer_order_no)}</BASICBUYERORDERNO>\n`;
+    }
+    if (supplier_ref) {
+        xml += `            <PARTYREFERENCE>${escapeXml(supplier_ref)}</PARTYREFERENCE>\n`;
+    }
+    if (vehicle_number) {
+        xml += `            <VCHBKGTRANSPORT>${escapeXml(vehicle_number)}</VCHBKGTRANSPORT>\n`;
+    }
 
     xml += `            <ALLLEDGERENTRIES.LIST>\n`;
     xml += `              <LEDGERNAME>${escapeXml(cleanVendor)}</LEDGERNAME>\n`;
@@ -249,12 +276,36 @@ function generateTallyXml(data, options = { safeEduMode: true }) {
     xml += `              </BILLALLOCATIONS.LIST>\n`;
     xml += `            </ALLLEDGERENTRIES.LIST>\n`;
 
-    if (taxable_amount > 0) {
-        xml += `            <ALLLEDGERENTRIES.LIST>\n`;
-        xml += `              <LEDGERNAME>${escapeXml(purchase_ledger)}</LEDGERNAME>\n`;
-        xml += `              <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>\n`;
-        xml += `              <AMOUNT>${Number(taxable_amount).toFixed(2)}</AMOUNT>\n`;
-        xml += `            </ALLLEDGERENTRIES.LIST>\n`;
+    if (items && items.length > 0) {
+        items.forEach(item => {
+            const itemName = escapeXml(item.description || 'Item');
+            const itemQty = escapeXml(`${item.quantity || 1} ${item.unit || 'Nos'}`);
+            const itemRate = escapeXml(`${item.rate || 0}/${item.unit || 'Nos'}`);
+            const itemTaxable = Number(item.taxable_value || 0).toFixed(2);
+
+            xml += `            <ALLINVENTORYENTRIES.LIST>\n`;
+            xml += `              <STOCKITEMNAME>${itemName}</STOCKITEMNAME>\n`;
+            xml += `              <HSNCODE>${escapeXml(item.hsn_sac || '')}</HSNCODE>\n`;
+            xml += `              <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>\n`;
+            xml += `              <RATE>${itemRate}</RATE>\n`;
+            xml += `              <AMOUNT>-${itemTaxable}</AMOUNT>\n`;
+            xml += `              <ACTUALQTY>${itemQty}</ACTUALQTY>\n`;
+            xml += `              <BILLEDQTY>${itemQty}</BILLEDQTY>\n`;
+            xml += `              <ACCOUNTINGALLOCATIONS.LIST>\n`;
+            xml += `                <LEDGERNAME>${escapeXml(purchase_ledger)}</LEDGERNAME>\n`;
+            xml += `                <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>\n`;
+            xml += `                <AMOUNT>-${itemTaxable}</AMOUNT>\n`;
+            xml += `              </ACCOUNTINGALLOCATIONS.LIST>\n`;
+            xml += `            </ALLINVENTORYENTRIES.LIST>\n`;
+        });
+    } else {
+        if (taxable_amount > 0) {
+            xml += `            <ALLLEDGERENTRIES.LIST>\n`;
+            xml += `              <LEDGERNAME>${escapeXml(purchase_ledger)}</LEDGERNAME>\n`;
+            xml += `              <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>\n`;
+            xml += `              <AMOUNT>${Number(taxable_amount).toFixed(2)}</AMOUNT>\n`;
+            xml += `            </ALLLEDGERENTRIES.LIST>\n`;
+        }
     }
 
     if (cgst_amount > 0) {
@@ -321,9 +372,9 @@ function auditInvoiceData(raw) {
         mathDiff = 0.0;
     }
 
-    const vendorName = (raw.vendor_name || raw.vendorName || '').trim();
+    const vendorName = (raw.supplier_name || raw.vendor_name || raw.vendorName || '').trim();
     const invNum = (raw.invoice_number || raw.invoiceNumber || '').trim();
-    const gstin = (raw.gstin || '').trim();
+    const gstin = (raw.supplier_gstin || raw.gstin || '').trim();
     const isGstinValid = gstin ? validateGstin(gstin) : false;
     const hasEssentialFields = Boolean(vendorName && invNum && grandTotal > 0);
 
@@ -341,6 +392,12 @@ function auditInvoiceData(raw) {
         invoice_date: raw.invoice_date || raw.invoiceDate || '',
         vendor_name: vendorName,
         gstin: gstin.toUpperCase(),
+        buyer_order_no: raw.buyer_order_no || '',
+        supplier_ref: raw.supplier_ref || '',
+        vehicle_number: raw.vehicle_number || '',
+        payment_mode: raw.payment_mode || '',
+        supplier_address: raw.supplier_address || '',
+        supplier_state: raw.supplier_state || '',
         taxable_amount: taxable,
         cgst_amount: cgst,
         sgst_amount: sgst,
@@ -348,7 +405,8 @@ function auditInvoiceData(raw) {
         roundoff_amount: roundoff,
         grand_total: grandTotal,
         verification_state: status,
-        math_difference: mathDiff
+        math_difference: mathDiff,
+        items: raw.items || []
     };
 }
 
@@ -370,8 +428,14 @@ async function processFileWithGemini(genAI, filePath, mimeType) {
     Return a valid JSON object with the following exact keys:
     - "invoice_number": (string) Unique invoice or bill number
     - "invoice_date": (string) Date in YYYY-MM-DD format
-    - "vendor_name": (string) Supplier/seller company full name
-    - "gstin": (string) 15-character GSTIN number of the vendor (supplier)
+    - "buyer_order_no": (string) Buyer's order number
+    - "supplier_ref": (string) Supplier's reference
+    - "vehicle_number": (string) Vehicle number
+    - "payment_mode": (string) Payment mode
+    - "supplier_name": (string) Supplier/seller company full name
+    - "supplier_gstin": (string) 15-character GSTIN number of the vendor (supplier)
+    - "supplier_address": (string) Full address of the supplier
+    - "supplier_state": (string) State of the supplier
     - "taxable_amount": (number) Subtotal taxable amount before tax
     - "cgst_amount": (number) Central GST amount (0.0 if not present)
     - "sgst_amount": (number) State GST amount (0.0 if not present)
@@ -379,14 +443,24 @@ async function processFileWithGemini(genAI, filePath, mimeType) {
     - "roundoff_amount": (number) Rounding adjustment amount
     - "grand_total": (number) Final payable total amount
     - "place_of_supply": (string) Place/State of supply (e.g. Maharashtra)
-    - "narration": (string) Short narration note
-    - "hsn_code": (string) HSN/SAC code of main items
-    - "quantity": (number or string) Item quantity
+    - "items": (array of objects) Extract EVERY single line item present in the invoice table without summarizing, grouping, or truncating the list. Each object must have:
+        - "description": (string) Item description / Ledger
+        - "hsn_sac": (string) HSN/SAC code
+        - "quantity": (number) Item quantity
+        - "unit": (string) Item unit (e.g., "Nos", "Box", "Pkt")
+        - "rate": (number) Item rate (₹)
+        - "taxable_value": (number) Taxable value of the item
+        - "gst_rate": (number) GST rate applied
+        - "gst_amount": (number) Total GST amount for the item
+        - "total": (number) Final total for the item
 
     STRICT DIRECTIVES:
     1. If the document is rotated, visually auto-orient it before extraction.
     2. If the document contains excessive terms or marketing text, ignore it. Extract ONLY the requested JSON keys.
     3. If a data point (like GSTIN or HSN) is missing, output null for text and 0 for numeric fields. Do NOT refuse to extract the document.
+    4. Visual Primacy: You must extract the EXACT numeric values printed on the invoice image for Rate and Taxable Value. DO NOT guess or alter numbers. If an item says '750', extract '750'.
+    5. Mathematical Validation Order: When cross-checking (Quantity * Rate = Taxable Value), if the math does not align, assume your OCR/vision reading of the numbers is wrong. Re-read the image carefully. DO NOT alter the extracted 'Taxable Value' to fit a hallucinated 'Rate'. The final Taxable Value column is your absolute source of truth.
+    6. Grand Total Validation: Before returning the JSON, add up the 'taxable_value' of every single line item. This sum MUST equal the 'Sub-Total' or 'Total Taxable Value' printed at the bottom of the invoice table. If it does not match, you have misread an item's rate or taxable value.
 
     Ensure numeric amounts are precise numbers without currency symbols.
     `;
@@ -479,13 +553,18 @@ app.post('/api/extract-invoice', ClerkExpressRequireAuth({}), extractLimiter, up
                         fileType: file.mimetype.includes('pdf') ? 'pdf' : 'image',
                         invoiceNumber: audited.invoice_number,
                         invoiceDate: audited.invoice_date,
+                        buyerOrderNo: audited.buyer_order_no,
+                        supplierRef: audited.supplier_ref,
+                        vehicleNumber: audited.vehicle_number,
+                        paymentMode: audited.payment_mode,
+                        supplierAddress: audited.supplier_address,
+                        supplierState: audited.supplier_state,
                         vendorName: audited.vendor_name,
                         gstin: audited.gstin,
                         placeOfSupply: extractedRaw.place_of_supply || 'Maharashtra',
                         tallyLedgerName: finalLedgerName,
                         narration: extractedRaw.narration || `Purchase from ${audited.vendor_name || 'Vendor'} vide Invoice #${audited.invoice_number || ''}`,
-                        hsnCode: extractedRaw.hsn_code || '998313',
-                        quantity: extractedRaw.quantity || 1,
+                        items: audited.items,
                         taxableAmount: audited.taxable_amount,
                         taxBreakdown: {
                             cgst: audited.cgst_amount,
@@ -516,8 +595,7 @@ app.post('/api/extract-invoice', ClerkExpressRequireAuth({}), extractLimiter, up
                         placeOfSupply: 'Pending',
                         tallyLedgerName: 'Pending',
                         narration: 'N/A',
-                        hsnCode: 'N/A',
-                        quantity: 0,
+                        items: [],
                         taxableAmount: 0,
                         taxBreakdown: { cgst: 0, sgst: 0, igst: 0 },
                         roundoffAmount: 0,

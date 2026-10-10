@@ -899,24 +899,67 @@ function App() {
                                                         </tr>
                                                     </thead>
                                                     <tbody className="divide-y divide-slate-200/60 text-slate-700">
-                                                        <tr>
-                                                            <td className="px-3 py-2 font-sans font-medium text-slate-800">
-                                                                <input type="text" className="w-full bg-white border border-slate-200 rounded px-1 py-0.5 mb-1 focus:outline-none focus:ring-1 focus:ring-emerald-500 text-xs" value={activeReviewInvoice?.itemDescription || ''} onChange={(e) => handleInvoiceChange('itemDescription', e.target.value)} placeholder="Item Description" />
-                                                                <div className="text-[10px] text-slate-400 font-mono">Ledger: {activeReviewInvoice?.tallyLedgerName || 'Purchase Account'}</div>
-                                                            </td>
-                                                            <td className="px-2 py-2 text-center text-slate-600 font-mono">
-                                                                <input type="text" className="w-full bg-white border border-slate-200 rounded px-1 py-0.5 text-center focus:outline-none focus:ring-1 focus:ring-emerald-500 text-xs" value={activeReviewInvoice?.hsnCode || ''} onChange={(e) => handleInvoiceChange('hsnCode', e.target.value)} placeholder="HSN" />
-                                                            </td>
-                                                            <td className="px-2 py-2 text-right text-slate-800 font-semibold font-mono">
-                                                                <input type="number" className="w-16 bg-white border border-slate-200 rounded px-1 py-0.5 text-right focus:outline-none focus:ring-1 focus:ring-emerald-500 text-xs" value={activeReviewInvoice?.quantity || ''} onChange={(e) => handleInvoiceChange('quantity', safeNum(e.target.value))} />
-                                                            </td>
-                                                            <td className="px-2 py-2 text-right text-slate-600 font-mono">
-                                                                {formatINR(activeReviewInvoice?.taxableAmount ? (activeReviewInvoice.taxableAmount / (activeReviewInvoice.quantity || 1)) : 0)}
-                                                            </td>
-                                                            <td className="px-3 py-2 text-right font-semibold text-slate-900 font-mono">
-                                                                <input type="number" className="w-24 bg-white border border-slate-200 rounded px-1 py-0.5 text-right focus:outline-none focus:ring-1 focus:ring-emerald-500 text-xs" value={activeReviewInvoice?.taxableAmount || ''} onChange={(e) => handleInvoiceChange('taxableAmount', safeNum(e.target.value))} />
-                                                            </td>
-                                                        </tr>
+                                                        {(!activeReviewInvoice?.items || activeReviewInvoice.items.length === 0) ? (
+                                                            <tr>
+                                                                <td className="px-3 py-2 font-sans font-medium text-slate-800">
+                                                                    <input type="text" className="w-full bg-white border border-slate-200 rounded px-1 py-0.5 mb-1 focus:outline-none focus:ring-1 focus:ring-emerald-500 text-xs" value={activeReviewInvoice?.itemDescription || ''} onChange={(e) => handleInvoiceChange('itemDescription', e.target.value)} placeholder="Item Description" />
+                                                                    <div className="text-[10px] text-slate-400 font-mono">Ledger: {activeReviewInvoice?.tallyLedgerName || 'Purchase Account'}</div>
+                                                                </td>
+                                                                <td className="px-2 py-2 text-center text-slate-600 font-mono">
+                                                                    <input type="text" className="w-full bg-white border border-slate-200 rounded px-1 py-0.5 text-center focus:outline-none focus:ring-1 focus:ring-emerald-500 text-xs" value={activeReviewInvoice?.hsnCode || ''} onChange={(e) => handleInvoiceChange('hsnCode', e.target.value)} placeholder="HSN" />
+                                                                </td>
+                                                                <td className="px-2 py-2 text-right text-slate-800 font-semibold font-mono">
+                                                                    <input type="number" className="w-16 bg-white border border-slate-200 rounded px-1 py-0.5 text-right focus:outline-none focus:ring-1 focus:ring-emerald-500 text-xs" value={activeReviewInvoice?.quantity || ''} onChange={(e) => handleInvoiceChange('quantity', safeNum(e.target.value))} />
+                                                                </td>
+                                                                <td className="px-2 py-2 text-right text-slate-600 font-mono">
+                                                                    {formatINR(activeReviewInvoice?.taxableAmount ? (activeReviewInvoice.taxableAmount / (activeReviewInvoice.quantity || 1)) : 0)}
+                                                                </td>
+                                                                <td className="px-3 py-2 text-right font-semibold text-slate-900 font-mono">
+                                                                    <input type="number" className="w-24 bg-white border border-slate-200 rounded px-1 py-0.5 text-right focus:outline-none focus:ring-1 focus:ring-emerald-500 text-xs" value={activeReviewInvoice?.taxableAmount || ''} onChange={(e) => handleInvoiceChange('taxableAmount', safeNum(e.target.value))} />
+                                                                </td>
+                                                            </tr>
+                                                        ) : (
+                                                            activeReviewInvoice.items.map((item, index) => (
+                                                                <tr key={index}>
+                                                                    <td className="px-3 py-2 font-sans font-medium text-slate-800">
+                                                                        <input type="text" className="w-full bg-white border border-slate-200 rounded px-1 py-0.5 mb-1 focus:outline-none focus:ring-1 focus:ring-emerald-500 text-xs" value={item.description || ''} onChange={(e) => {
+                                                                            const newItems = [...(activeReviewInvoice.items || [])];
+                                                                            newItems[index] = { ...newItems[index], description: e.target.value };
+                                                                            handleInvoiceChange('items', newItems);
+                                                                        }} placeholder="Item Description" />
+                                                                        <div className="text-[10px] text-slate-400 font-mono">Ledger: {activeReviewInvoice?.tallyLedgerName || 'Purchase Account'}</div>
+                                                                    </td>
+                                                                    <td className="px-2 py-2 text-center text-slate-600 font-mono">
+                                                                        <input type="text" className="w-full bg-white border border-slate-200 rounded px-1 py-0.5 text-center focus:outline-none focus:ring-1 focus:ring-emerald-500 text-xs" value={item.hsn_sac || ''} onChange={(e) => {
+                                                                            const newItems = [...(activeReviewInvoice.items || [])];
+                                                                            newItems[index] = { ...newItems[index], hsn_sac: e.target.value };
+                                                                            handleInvoiceChange('items', newItems);
+                                                                        }} placeholder="HSN" />
+                                                                    </td>
+                                                                    <td className="px-2 py-2 text-right text-slate-800 font-semibold font-mono">
+                                                                        <input type="number" className="w-16 bg-white border border-slate-200 rounded px-1 py-0.5 text-right focus:outline-none focus:ring-1 focus:ring-emerald-500 text-xs" value={item.quantity || ''} onChange={(e) => {
+                                                                            const newItems = [...(activeReviewInvoice.items || [])];
+                                                                            newItems[index] = { ...newItems[index], quantity: safeNum(e.target.value) };
+                                                                            handleInvoiceChange('items', newItems);
+                                                                        }} />
+                                                                    </td>
+                                                                    <td className="px-2 py-2 text-right text-slate-600 font-mono">
+                                                                        <input type="number" className="w-20 bg-white border border-slate-200 rounded px-1 py-0.5 text-right focus:outline-none focus:ring-1 focus:ring-emerald-500 text-xs" value={item.rate || ''} onChange={(e) => {
+                                                                            const newItems = [...(activeReviewInvoice.items || [])];
+                                                                            newItems[index] = { ...newItems[index], rate: safeNum(e.target.value) };
+                                                                            handleInvoiceChange('items', newItems);
+                                                                        }} placeholder="Rate" />
+                                                                    </td>
+                                                                    <td className="px-3 py-2 text-right font-semibold text-slate-900 font-mono">
+                                                                        <input type="number" className="w-24 bg-white border border-slate-200 rounded px-1 py-0.5 text-right focus:outline-none focus:ring-1 focus:ring-emerald-500 text-xs" value={item.taxable_value || ''} onChange={(e) => {
+                                                                            const newItems = [...(activeReviewInvoice.items || [])];
+                                                                            newItems[index] = { ...newItems[index], taxable_value: safeNum(e.target.value) };
+                                                                            handleInvoiceChange('items', newItems);
+                                                                        }} />
+                                                                    </td>
+                                                                </tr>
+                                                            ))
+                                                        )}
                                                     </tbody>
                                                 </table>
                                             </div>
