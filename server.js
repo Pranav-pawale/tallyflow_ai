@@ -398,19 +398,12 @@ async function processFileWithGemini(genAI, filePath, mimeType) {
     Ensure numeric amounts are precise numbers without currency symbols.
     `;
 
-    const modelsToTry = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash-latest'];
+    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+    const maxAttempts = 3;
     let lastError = null;
 
-    for (const modelName of modelsToTry) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
-            const model = genAI.getGenerativeModel({
-                model: modelName,
-                generationConfig: {
-                    responseMimeType: 'application/json',
-                    temperature: 0.1
-                }
-            });
-
             const result = await model.generateContent([prompt, imagePart]);
             let responseText = result.response.text();
             try {
@@ -421,9 +414,34 @@ async function processFileWithGemini(genAI, filePath, mimeType) {
                 return JSON.parse(sanitized);
             }
         } catch (err) {
-            console.warn(`[Gemini AI] Model ${modelName} failed:`, err.message);
             lastError = err;
+            console.warn(`[Gemini AI] Attempt ${attempt} failed:`, err.message);
+
+            const is503 = err.status === 503 ||
+                (err.message && (err.message.includes('503') || err.message.includes('Service Unavailable') || err.message.includes('overloaded') || err.message.includes('ResourceExhausted')));
+
+            if (is503 && attempt < maxAttempts) {
+                console.log(`[Gemini AI] 503 / Service Unavailable encountered. Waiting 2 seconds before retry (attempt ${attempt + 1}/${maxAttempts})...`);
+                await new Promise(r => setTimeout(r, 2000));
+                continue;
+            }
+
+            if (!is503) {
+                break;
+            }
         }
+    }
+
+    const is503Final = lastError && (lastError.status === 503 ||
+        (lastError.message && (lastError.message.includes('503') || lastError.message.includes('Service Unavailable') || lastError.message.includes('overloaded') || lastError.message.includes('ResourceExhausted'))));
+
+    if (is503Final) {
+        if (res && typeof res.status === 'function' && !res.headersSent) {
+            return res.status(503).json({ error: "AI Service temporarily unavailable. Please try again." });
+        }
+        const err503 = new Error("AI Service temporarily unavailable. Please try again.");
+        err503.status = 503;
+        throw err503;
     }
 
     throw new Error(`AI extraction failed: ${lastError ? lastError.message : 'Unknown error'}`);
@@ -477,7 +495,8 @@ app.post('/api/extract-invoice', extractLimiter, requireClerkAuth, upload.any(),
         const processedInvoices = await Promise.all(
             uploadedFiles.map(async (file, i) => {
                 try {
-                    const extractedRaw = await processFileWithGemini(genAI, file.path, file.mimetype);
+                    const extractedRaw = await processFileWithGemini(genAI, file.path, file.mimetype, res);
+                    if (res.headersSent) return null;
                     const audited = auditInvoiceData(extractedRaw);
                     const savedLedger = await getMappedVendorLedger(orgId, audited.vendor_name);
                     const finalLedgerName = savedLedger || (audited.vendor_name ? `${audited.vendor_name} Ledger` : 'Sundry Creditors');
@@ -515,6 +534,9 @@ app.post('/api/extract-invoice', extractLimiter, requireClerkAuth, upload.any(),
                     };
                 } catch (fileErr) {
                     console.error(`Error processing file ${file.originalname}:`, fileErr);
+                    if (fileErr.status === 503 || (fileErr.message && (fileErr.message.includes('503') || fileErr.message.includes('temporarily unavailable')))) {
+                        throw fileErr;
+                    }
                     return {
                         id: `inv_${Date.now()}_${i}_err`,
                         orgId: orgId || null,
@@ -549,10 +571,12 @@ app.post('/api/extract-invoice', extractLimiter, requireClerkAuth, upload.any(),
             })
         );
 
+        if (res.headersSent) return;
+
         try {
             const stmt = db.prepare('INSERT OR REPLACE INTO invoices (id, orgId, userId, fileName, vendorName, invoiceNumber, totalAmount, verificationState, fullData) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
             processedInvoices.forEach(inv => {
-                if (inv.id && !inv.id.endsWith('_err')) {
+                if (inv && inv.id && !inv.id.endsWith('_err')) {
                     stmt.run(inv.id, orgId, userId, inv.fileName, inv.vendorName, inv.invoiceNumber, inv.totalAmount, inv.verificationState, JSON.stringify(inv));
                     if (inv.vendorName) {
                         saveVendorMapping(orgId, inv.vendorName, inv.tallyLedgerName, inv.gstin);
@@ -578,6 +602,12 @@ app.post('/api/extract-invoice', extractLimiter, requireClerkAuth, upload.any(),
             if (fs.existsSync(f.path)) fs.unlink(f.path, () => { });
         });
         console.error('Extraction Error:', err.message);
+        if (res.headersSent) return;
+        if (err.status === 503 || (err.message && (err.message.includes('503') || err.message.includes('temporarily unavailable')))) {
+            return res.status(503).json({
+                error: "AI Service temporarily unavailable. Please try again."
+            });
+        }
         return res.status(500).json({
             success: false,
             error: err.message || 'An unexpected error occurred during invoice processing.'
@@ -628,6 +658,39 @@ app.get('/api/health', (req, res) => {
             frontend_key_exposed: false
         }
     });
+});
+
+// API ENDPOINT: POST /api/sync-tally (Direct bridge to local TallyPrime server)
+app.post('/api/sync-tally', async (req, res) => {
+    try {
+        const { xmlData } = req.body;
+        if (!xmlData) {
+            return res.status(400).json({ success: false, error: 'xmlData is required in request body' });
+        }
+
+        const tallyResponse = await fetch('http://localhost:9000/', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'text/xml'
+            },
+            body: xmlData
+        });
+
+        const responseText = await tallyResponse.text();
+
+        if (!tallyResponse.ok) {
+            return res.status(tallyResponse.status).send(responseText);
+        }
+
+        res.set('Content-Type', 'text/xml');
+        return res.status(200).send(responseText);
+    } catch (err) {
+        console.error('❌ Tally Direct Sync Error:', err.message);
+        return res.status(500).json({
+            success: false,
+            error: 'Failed to connect to Tally. Ensure TallyPrime is open and running on port 9000.'
+        });
+    }
 });
 
 // Global error fallback to prevent silent crashes

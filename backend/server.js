@@ -89,15 +89,18 @@ const extractLimiter = rateLimit({
 
 app.use(globalLimiter);
 
-// Enable CORS for frontend communication
+// CORS — must sit above all routes
 app.use(cors({
-    origin: 'http://localhost:5173',
-    methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Authorization', 'Content-Type']
+    origin: '*',
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Accept']
 }));
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// Explicitly answer OPTIONS preflight for every route (Express 5 compatible)
+app.options('/{*path}', cors());
+
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Serve static frontend files from 'public' directory
 app.use(express.static(path.join(__dirname, '../frontend/dist')));
@@ -163,6 +166,103 @@ function validateGstin(gstin) {
     return regex.test(gstin.trim().toUpperCase());
 }
 
+// Utility: Flexible date parser → YYYYMMDD (Tally required format)
+// Accepts: '2026-09-01', '01/09/2026', '1-sept 2026', '1 Sep 2026', '20260901', etc.
+function formatTallyDate(dateString) {
+    if (!dateString) return null;
+    const str = String(dateString).trim();
+
+    // Already in YYYYMMDD numeric form
+    if (/^\d{8}$/.test(str)) return str;
+
+    // Month name → number map (covers full names + common abbreviations)
+    const monthMap = {
+        january: '01', jan: '01',
+        february: '02', feb: '02',
+        march: '03', mar: '03',
+        april: '04', apr: '04',
+        may: '05',
+        june: '06', jun: '06',
+        july: '07', jul: '07',
+        august: '08', aug: '08',
+        september: '09', sep: '09', sept: '09',
+        october: '10', oct: '10',
+        november: '11', nov: '11',
+        december: '12', dec: '12'
+    };
+
+    // Normalise separators so we can split uniformly
+    const normalised = str.replace(/[\-\/\s,]+/g, ' ').trim().toLowerCase();
+    const parts = normalised.split(' ').filter(Boolean);
+
+    let day, month, year;
+
+    if (parts.length === 3) {
+        // Try DD-MonthName-YYYY  or  MonthName-DD-YYYY  or  YYYY-MM-DD
+        const p0 = parts[0], p1 = parts[1], p2 = parts[2];
+
+        if (monthMap[p1]) {
+            // DD MonthName YYYY
+            day   = p0.padStart(2, '0');
+            month = monthMap[p1];
+            year  = p2;
+        } else if (monthMap[p0]) {
+            // MonthName DD YYYY
+            month = monthMap[p0];
+            day   = p1.padStart(2, '0');
+            year  = p2;
+        } else if (monthMap[p2]) {
+            // DD MM(name) YYYY — already handled above; fallback
+            day   = p0.padStart(2, '0');
+            month = monthMap[p2];
+            year  = p1;
+        } else if (/^\d{4}$/.test(p0)) {
+            // YYYY MM DD
+            year  = p0;
+            month = p1.padStart(2, '0');
+            day   = p2.padStart(2, '0');
+        } else if (/^\d{4}$/.test(p2)) {
+            // DD MM YYYY  or  MM DD YYYY
+            // Heuristic: if first part > 12, it must be DD
+            const n0 = parseInt(p0, 10);
+            const n1 = parseInt(p1, 10);
+            year = p2;
+            if (n0 > 12) {
+                day   = p0.padStart(2, '0');
+                month = p1.padStart(2, '0');
+            } else {
+                // Ambiguous — assume DD/MM for Indian locale
+                day   = p0.padStart(2, '0');
+                month = p1.padStart(2, '0');
+            }
+        }
+    }
+
+    if (year && month && day) {
+        const candidate = `${year}${month}${day}`;
+        // Quick sanity check via native Date
+        const d = new Date(`${year}-${month}-${day}`);
+        if (!isNaN(d.getTime())) return candidate;
+    }
+
+    // Last-resort: let native Date try to parse it
+    const d = new Date(dateString);
+    if (!isNaN(d.getTime())) {
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, '0');
+        const dd = String(d.getDate()).padStart(2, '0');
+        return `${y}${m}${dd}`;
+    }
+
+    // Fallback: today's date
+    const now = new Date();
+    const fy = now.getFullYear();
+    const fm = String(now.getMonth() + 1).padStart(2, '0');
+    const fd = String(now.getDate()).padStart(2, '0');
+    console.warn(`[formatTallyDate] Could not parse "${dateString}", falling back to today: ${fy}${fm}${fd}`);
+    return `${fy}${fm}${fd}`;
+}
+
 // Utility: Generate TallyPrime Purchase Voucher XML
 function generateTallyXml(data, options = { safeEduMode: true }) {
     const {
@@ -189,22 +289,11 @@ function generateTallyXml(data, options = { safeEduMode: true }) {
         items = []
     } = data;
 
-    let dateFormatted = '';
-    if (invoice_date) {
-        const d = new Date(invoice_date);
-        if (!isNaN(d.getTime())) {
-            const year = d.getFullYear();
-            const month = String(d.getMonth() + 1).padStart(2, '0');
-            const day = String(d.getDate()).padStart(2, '0');
-            dateFormatted = `${year}${month}${day}`;
-        }
-    }
-    if (!dateFormatted) {
+    // Use the robust multi-format date parser
+    const dateFormatted = formatTallyDate(invoice_date) || (() => {
         const now = new Date();
-        const year = now.getFullYear();
-        const month = String(now.getMonth() + 1).padStart(2, '0');
-        dateFormatted = `${year}${month}01`;
-    }
+        return `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`;
+    })();
 
     const invNo = (invoice_number || 'INV-001').trim();
     const cleanVendor = (vendor_name || 'Vendor Ledger').trim();
@@ -419,9 +508,8 @@ function fileToGenerativePart(filePath, mimeType) {
         }
     };
 }
-
-// Helper: Call Gemini AI with fallback from 2.5-flash to 1.5-flash
-async function processFileWithGemini(genAI, filePath, mimeType) {
+// Helper: Call Gemini AI with gemini-2.5-flash and retry mechanism
+async function processFileWithGemini(genAI, filePath, mimeType, res = null) {
     const imagePart = fileToGenerativePart(filePath, mimeType);
     const prompt = `
     Extract invoice metadata from this Indian vendor invoice image or document.
@@ -465,19 +553,12 @@ async function processFileWithGemini(genAI, filePath, mimeType) {
     Ensure numeric amounts are precise numbers without currency symbols.
     `;
 
-    const modelsToTry = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash-latest'];
+    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+    const maxAttempts = 3;
     let lastError = null;
 
-    for (const modelName of modelsToTry) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
-            const model = genAI.getGenerativeModel({
-                model: modelName,
-                generationConfig: {
-                    responseMimeType: 'application/json',
-                    temperature: 0.1
-                }
-            });
-
             const result = await model.generateContent([prompt, imagePart]);
             let responseText = result.response.text();
             try {
@@ -488,9 +569,34 @@ async function processFileWithGemini(genAI, filePath, mimeType) {
                 return JSON.parse(sanitized);
             }
         } catch (err) {
-            console.warn(`[Gemini AI] Model ${modelName} failed:`, err.message);
             lastError = err;
+            console.warn(`[Gemini AI] Attempt ${attempt} failed:`, err.message);
+
+            const is503 = err.status === 503 ||
+                (err.message && (err.message.includes('503') || err.message.includes('Service Unavailable') || err.message.includes('overloaded') || err.message.includes('ResourceExhausted')));
+
+            if (is503 && attempt < maxAttempts) {
+                console.log(`[Gemini AI] 503 / Service Unavailable encountered. Waiting 2 seconds before retry (attempt ${attempt + 1}/${maxAttempts})...`);
+                await new Promise(r => setTimeout(r, 2000));
+                continue;
+            }
+
+            if (!is503) {
+                break;
+            }
         }
+    }
+
+    const is503Final = lastError && (lastError.status === 503 ||
+        (lastError.message && (lastError.message.includes('503') || lastError.message.includes('Service Unavailable') || lastError.message.includes('overloaded') || lastError.message.includes('ResourceExhausted'))));
+
+    if (is503Final) {
+        if (res && typeof res.status === 'function' && !res.headersSent) {
+            return res.status(503).json({ error: "AI Service temporarily unavailable. Please try again." });
+        }
+        const err503 = new Error("AI Service temporarily unavailable. Please try again.");
+        err503.status = 503;
+        throw err503;
     }
 
     throw new Error(`AI extraction failed: ${lastError ? lastError.message : 'Unknown error'}`);
@@ -538,7 +644,8 @@ app.post('/api/extract-invoice', ClerkExpressRequireAuth({}), extractLimiter, up
         const processedInvoices = await Promise.all(
             uploadedFiles.map(async (file, i) => {
                 try {
-                    const extractedRaw = await processFileWithGemini(genAI, file.path, file.mimetype);
+                    const extractedRaw = await processFileWithGemini(genAI, file.path, file.mimetype, res);
+                    if (res.headersSent) return null;
                     const audited = auditInvoiceData(extractedRaw);
                     const savedLedger = await getMappedVendorLedger(orgId, audited.vendor_name);
                     const finalLedgerName = savedLedger || (audited.vendor_name ? `${audited.vendor_name} Ledger` : 'Sundry Creditors');
@@ -581,6 +688,9 @@ app.post('/api/extract-invoice', ClerkExpressRequireAuth({}), extractLimiter, up
                     };
                 } catch (fileErr) {
                     console.error(`Error processing file ${file.originalname}:`, fileErr);
+                    if (fileErr.status === 503 || (fileErr.message && (fileErr.message.includes('503') || fileErr.message.includes('temporarily unavailable')))) {
+                        throw fileErr;
+                    }
                     return {
                         id: `inv_${Date.now()}_${i}_err`,
                         orgId: orgId || null,
@@ -614,10 +724,12 @@ app.post('/api/extract-invoice', ClerkExpressRequireAuth({}), extractLimiter, up
             })
         );
 
+        if (res.headersSent) return;
+
         try {
             const stmt = db.prepare('INSERT OR REPLACE INTO invoices (id, orgId, userId, fileName, vendorName, invoiceNumber, totalAmount, verificationState, fullData) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
             processedInvoices.forEach(inv => {
-                if (inv.id && !inv.id.endsWith('_err')) {
+                if (inv && inv.id && !inv.id.endsWith('_err')) {
                     stmt.run(inv.id, orgId, userId, inv.fileName, inv.vendorName, inv.invoiceNumber, inv.totalAmount, inv.verificationState, JSON.stringify(inv));
                     if (inv.vendorName) {
                         saveVendorMapping(orgId, inv.vendorName, inv.tallyLedgerName, inv.gstin);
@@ -643,6 +755,12 @@ app.post('/api/extract-invoice', ClerkExpressRequireAuth({}), extractLimiter, up
             if (fs.existsSync(f.path)) fs.unlink(f.path, () => { });
         });
         console.error('Extraction Error:', err.message);
+        if (res.headersSent) return;
+        if (err.status === 503 || (err.message && (err.message.includes('503') || err.message.includes('temporarily unavailable')))) {
+            return res.status(503).json({
+                error: "AI Service temporarily unavailable. Please try again."
+            });
+        }
         return res.status(500).json({
             success: false,
             error: err.message || 'An unexpected error occurred during invoice processing.'
@@ -673,6 +791,88 @@ app.get('/api/invoices', ClerkExpressRequireAuth({}), (req, res) => {
     }
 });
 
+// API ENDPOINT: PUT /api/invoices/:id — Update invoice fields, regenerate XML, persist to DB
+app.put('/api/invoices/:id', ClerkExpressRequireAuth({}), (req, res) => {
+    try {
+        const { id } = req.params;
+        const orgId = req.auth ? (req.auth.orgId || 'default_org') : 'default_org';
+        const updates = req.body; // Full updated invoice payload from frontend
+
+        if (!id || !updates) {
+            return res.status(400).json({ success: false, error: 'Invoice ID and update payload are required.' });
+        }
+
+        // Fetch existing record first
+        db.get('SELECT * FROM invoices WHERE id = ? AND orgId = ?', [id, orgId], (err, row) => {
+            if (err) {
+                return res.status(500).json({ success: false, error: 'Database error: ' + err.message });
+            }
+            if (!row) {
+                return res.status(404).json({ success: false, error: 'Invoice not found.' });
+            }
+
+            let existing;
+            try {
+                existing = JSON.parse(row.fullData);
+            } catch (e) {
+                return res.status(500).json({ success: false, error: 'Failed to parse existing invoice data.' });
+            }
+
+            // Merge updates into existing record
+            const merged = { ...existing, ...updates, id };
+
+            // Build the data object expected by generateTallyXml
+            const xmlInput = {
+                invoice_number:    merged.invoiceNumber   || merged.invoice_number   || '',
+                invoice_date:      merged.invoiceDate     || merged.invoice_date     || '',
+                vendor_name:       merged.vendorName      || merged.vendor_name      || '',
+                gstin:             merged.gstin           || '',
+                supplier_address:  merged.supplierAddress || merged.supplier_address || '',
+                supplier_state:    merged.supplierState   || merged.supplier_state   || '',
+                buyer_order_no:    merged.buyerOrderNo    || merged.buyer_order_no   || '',
+                supplier_ref:      merged.supplierRef     || merged.supplier_ref     || '',
+                vehicle_number:    merged.vehicleNumber   || merged.vehicle_number   || '',
+                taxable_amount:    parseFloat(merged.taxableAmount  || merged.taxable_amount  || 0),
+                cgst_amount:       parseFloat(merged.taxBreakdown?.cgst || merged.cgst_amount || 0),
+                sgst_amount:       parseFloat(merged.taxBreakdown?.sgst || merged.sgst_amount || 0),
+                igst_amount:       parseFloat(merged.taxBreakdown?.igst || merged.igst_amount || 0),
+                roundoff_amount:   parseFloat(merged.roundoffAmount || merged.roundoff_amount || 0),
+                grand_total:       parseFloat(merged.totalAmount    || merged.grand_total     || 0),
+                purchase_ledger:   merged.tallyLedgerName || 'Purchase Account',
+                items:             merged.items || []
+            };
+
+            // Regenerate Tally XML with current field values
+            const freshXml = generateTallyXml(xmlInput);
+            merged.tallyXml = freshXml;
+
+            // Persist back to DB
+            const fullDataStr = JSON.stringify(merged);
+            db.run(
+                'UPDATE invoices SET vendorName = ?, invoiceNumber = ?, totalAmount = ?, verificationState = ?, fullData = ? WHERE id = ? AND orgId = ?',
+                [
+                    merged.vendorName      || '',
+                    merged.invoiceNumber   || '',
+                    parseFloat(merged.totalAmount || 0),
+                    merged.verificationState || 'needs_review',
+                    fullDataStr,
+                    id,
+                    orgId
+                ],
+                function(updateErr) {
+                    if (updateErr) {
+                        return res.status(500).json({ success: false, error: 'Failed to save invoice: ' + updateErr.message });
+                    }
+                    return res.json({ success: true, data: merged });
+                }
+            );
+        });
+    } catch (err) {
+        console.error('Invoice Update Error:', err.message);
+        res.status(500).json({ success: false, error: err.message || 'Internal Server Error' });
+    }
+});
+
 // Config endpoint for frontend Clerk publishable key
 app.get('/api/config', (req, res) => {
     res.json({
@@ -693,6 +893,39 @@ app.get('/api/health', (req, res) => {
             frontend_key_exposed: false
         }
     });
+});
+
+// API ENDPOINT: POST /api/sync-tally (Direct bridge to local TallyPrime server)
+app.post('/api/sync-tally', async (req, res) => {
+    try {
+        const { xmlData } = req.body;
+        if (!xmlData) {
+            return res.status(400).json({ success: false, error: 'xmlData is required in request body' });
+        }
+
+        const tallyResponse = await fetch('http://127.0.0.1:9000/', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'text/xml'
+            },
+            body: xmlData
+        });
+
+        const responseText = await tallyResponse.text();
+
+        if (!tallyResponse.ok) {
+            return res.status(tallyResponse.status).send(responseText);
+        }
+
+        res.set('Content-Type', 'text/xml');
+        return res.status(200).send(responseText);
+    } catch (err) {
+        console.error('❌ Tally Direct Sync Error:', err.message);
+        return res.status(500).json({
+            success: false,
+            error: 'Failed to connect to Tally. Ensure TallyPrime is open and running on port 9000.'
+        });
+    }
 });
 
 // Clerk Error Handling Middleware

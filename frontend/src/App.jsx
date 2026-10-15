@@ -14,6 +14,10 @@ function App() {
     const [xmlModalData, setXmlModalData] = useState(null);
     const [showRawXml, setShowRawXml] = useState(false);
     const [copyLabel, setCopyLabel] = useState('Copy XML');
+    const [isSyncing, setIsSyncing] = useState(false);
+    const [isSaving, setIsSaving] = useState(false);
+    const [toast, setToast] = useState(null); // { message, type: 'success' | 'error' }
+    const [isUploading, setIsUploading] = useState(false);
     const [isDragging, setIsDragging] = useState(false);
     const [isDataMappingOpen, setIsDataMappingOpen] = useState(true);
     const [isDataModalOpen, setIsDataModalOpen] = useState(false);
@@ -204,6 +208,8 @@ function App() {
             formData.append('files', file);
         });
 
+        setIsUploading(true);
+
         try {
             const response = await fetch('http://localhost:5000/api/extract-invoice', {
                 method: 'POST',
@@ -239,6 +245,8 @@ function App() {
                 return next;
             });
 
+            setIsUploading(false);
+
         } catch (err) {
             console.error("Upload error:", err);
             setErrorAlert(err.message || 'Error occurred during invoice extraction.');
@@ -248,7 +256,10 @@ function App() {
                 const tempIds = new Set(tempRows.map(t => t.id));
                 return prev.filter(item => !tempIds.has(item.id));
             });
+
+            setIsUploading(false);
         } finally {
+            setIsUploading(false);
             if (fileInputRef.current) fileInputRef.current.value = '';
         }
     };
@@ -384,6 +395,7 @@ function App() {
     const handleDrop = (e) => {
         e.preventDefault();
         setIsDragging(false);
+        if (isUploading) return;
         if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
             handleFileUpload(e.dataTransfer.files);
         }
@@ -409,9 +421,104 @@ function App() {
         URL.revokeObjectURL(url);
     };
 
+    // Auto-dismiss toast notification after 5 seconds
+    useEffect(() => {
+        if (toast) {
+            const timer = setTimeout(() => {
+                setToast(null);
+            }, 5000);
+            return () => clearTimeout(timer);
+        }
+    }, [toast]);
+
+    // Direct HTTP POST Sync to local TallyPrime (Port 9000)
+    const handleSyncToTally = async (xmlString) => {
+        if (!xmlString) {
+            setToast({
+                message: 'No XML data available to sync.',
+                type: 'error'
+            });
+            setErrorAlert('No XML data available to sync.');
+            return;
+        }
+
+        setIsSyncing(true);
+        setToast(null);
+
+        try {
+            const response = await fetch('http://localhost:5000/api/sync-tally', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ xmlData: xmlString })
+            });
+
+            if (response.ok) {
+                setToast({
+                    message: 'Successfully synced to TallyPrime!',
+                    type: 'success'
+                });
+                setErrorAlert(null);
+            } else {
+                let errorMsg = 'Failed to connect to Tally. Ensure TallyPrime is open and running on port 9000.';
+                try {
+                    const data = await response.json();
+                    if (data?.error) errorMsg = data.error;
+                } catch (_) {}
+                setToast({
+                    message: errorMsg,
+                    type: 'error'
+                });
+                setErrorAlert(errorMsg);
+            }
+        } catch (err) {
+            console.error('Error syncing to Tally:', err);
+            const errorMsg = 'Failed to connect to Tally. Ensure TallyPrime is open and running on port 9000.';
+            setToast({
+                message: errorMsg,
+                type: 'error'
+            });
+            setErrorAlert(errorMsg);
+        } finally {
+            setIsSyncing(false);
+        }
+    };
+
     // Phase 3 Math Calculations for Audit Review
     const computedTotalTax = activeReviewInvoice ? safeNum(activeReviewInvoice.taxBreakdown?.cgst) + safeNum(activeReviewInvoice.taxBreakdown?.sgst) + safeNum(activeReviewInvoice.taxBreakdown?.igst) : 0;
     const computedNetTotal = activeReviewInvoice ? safeNum(activeReviewInvoice.taxableAmount) + computedTotalTax + safeNum(activeReviewInvoice.roundoffAmount) : 0;
+
+    // Save Changes — persist edits to DB and regenerate Tally XML server-side
+    const handleSaveChanges = async () => {
+        if (!activeReviewInvoice || isSaving) return;
+        setIsSaving(true);
+        try {
+            const token = await getToken();
+            const response = await fetch(`http://localhost:5000/api/invoices/${activeReviewInvoice.id}`, {
+                method: 'PUT',
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(activeReviewInvoice)
+            });
+            const result = await response.json();
+            if (result.success && result.data) {
+                // Update both the review panel and the workbench list with fresh XML
+                setActiveReviewInvoice(result.data);
+                setInvoices(prev => prev.map(inv => inv.id === result.data.id ? result.data : inv));
+                setToast({ message: 'Changes saved — Tally XML regenerated successfully!', type: 'success' });
+            } else {
+                setToast({ message: result.error || 'Failed to save changes.', type: 'error' });
+            }
+        } catch (err) {
+            console.error('Save error:', err);
+            setToast({ message: 'Network error — could not save changes.', type: 'error' });
+        } finally {
+            setIsSaving(false);
+        }
+    };
 
     return (
         <React.Fragment>
@@ -1020,9 +1127,9 @@ function App() {
                                                     <input type="number" className="w-32 bg-white border border-blue-300 rounded px-2 py-1 text-base font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1" value={activeReviewInvoice?.totalAmount || ''} onChange={(e) => handleInvoiceChange('totalAmount', safeNum(e.target.value))} />
                                                 </div>
                                                 <div className="text-right font-sans">
-                                                    <button type="button" className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-1.5 rounded-lg text-xs font-semibold shadow-sm transition-colors flex items-center gap-1.5 mb-1 ml-auto">
-                                                        <span className="material-symbols-outlined text-[16px]">save</span>
-                                                        Save Changes
+                                                    <button type="button" onClick={handleSaveChanges} disabled={isSaving} className="bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white px-4 py-1.5 rounded-lg text-xs font-semibold shadow-sm transition-colors flex items-center gap-1.5 mb-1 ml-auto">
+                                                        <span className={`material-symbols-outlined text-[16px] ${isSaving ? 'animate-spin' : ''}`}>{isSaving ? 'sync' : 'save'}</span>
+                                                        {isSaving ? 'Saving...' : 'Save Changes'}
                                                     </button>
                                                     {computedNetTotal === safeNum(activeReviewInvoice?.totalAmount) ? (
                                                         <span className="text-[11px] font-semibold text-emerald-700 flex items-center justify-end gap-1 px-1 mt-1">
@@ -1117,23 +1224,37 @@ function App() {
                                                 onDragOver={handleDragOver}
                                                 onDragLeave={handleDragLeave}
                                                 onDrop={handleDrop}
-                                                onClick={() => fileInputRef.current && fileInputRef.current.click()}
-                                                className={`group relative border border-dashed ${isDragging ? 'border-blue-500 bg-blue-50/50' : 'border-slate-300 hover:border-slate-400 bg-white'} transition-all py-5 px-6 text-center rounded-xl shadow-2xs cursor-pointer flex flex-col items-center justify-center`}
+                                                onClick={() => !isUploading && fileInputRef.current && fileInputRef.current.click()}
+                                                className={`group relative border border-dashed ${isDragging ? 'border-blue-500 bg-blue-50/50' : 'border-slate-300 hover:border-slate-400 bg-white'} ${isUploading ? 'opacity-85 pointer-events-none' : ''} transition-all py-5 px-6 text-center rounded-xl shadow-2xs cursor-pointer flex flex-col items-center justify-center`}
                                             >
-                                                <div className="w-9 h-9 rounded-lg bg-slate-100 border border-slate-200/80 flex items-center justify-center text-slate-500 group-hover:text-slate-800 group-hover:bg-slate-200/60 transition-colors mb-2">
-                                                    <span className="material-symbols-outlined text-[20px]">cloud_upload</span>
+                                                <div className={`w-9 h-9 rounded-lg border flex items-center justify-center transition-colors mb-2 ${isUploading ? 'bg-blue-50 border-blue-200 text-blue-600' : 'bg-slate-100 border-slate-200/80 text-slate-500 group-hover:text-slate-800 group-hover:bg-slate-200/60'}`}>
+                                                    {isUploading ? (
+                                                        <span className="material-symbols-outlined text-[20px] animate-spin">sync</span>
+                                                    ) : (
+                                                        <span className="material-symbols-outlined text-[20px]">cloud_upload</span>
+                                                    )}
                                                 </div>
                                                 <h2 className="text-xs font-semibold text-slate-800 tracking-tight">
-                                                    Drag and drop invoice PDFs or images here (PNG, JPG, PDF up to 200MB)
+                                                    {isUploading ? 'Uploading & analyzing invoices with Gemini AI...' : 'Drag and drop invoice PDFs or images here (PNG, JPG, PDF up to 200MB)'}
                                                 </h2>
                                                 <div className="mt-3 flex items-center justify-center gap-3">
                                                     <button
                                                         type="button"
-                                                        onClick={(e) => { e.stopPropagation(); fileInputRef.current && fileInputRef.current.click(); }}
-                                                        className="px-3.5 py-1.5 text-xs font-medium rounded-lg bg-slate-900 text-white hover:bg-slate-800 inline-flex items-center gap-1.5 shadow-xs transition-colors"
+                                                        disabled={isUploading}
+                                                        onClick={(e) => { e.stopPropagation(); if (!isUploading && fileInputRef.current) fileInputRef.current.click(); }}
+                                                        className={`px-3.5 py-1.5 text-xs font-medium rounded-lg inline-flex items-center gap-1.5 shadow-xs transition-colors ${isUploading ? 'bg-slate-400 text-white cursor-not-allowed' : 'bg-slate-900 text-white hover:bg-slate-800'}`}
                                                     >
-                                                        <span className="material-symbols-outlined text-[15px]">folder_open</span>
-                                                        <span>Browse Invoice Files</span>
+                                                        {isUploading ? (
+                                                            <>
+                                                                <span className="material-symbols-outlined text-[15px] animate-spin">sync</span>
+                                                                <span>Extracting Invoices...</span>
+                                                            </>
+                                                        ) : (
+                                                            <>
+                                                                <span className="material-symbols-outlined text-[15px]">folder_open</span>
+                                                                <span>Browse Invoice Files</span>
+                                                            </>
+                                                        )}
                                                     </button>
                                                     <div className="flex items-center gap-1 text-[11px] text-slate-400 bg-slate-50 px-2.5 py-1 rounded-md border border-slate-200/70">
                                                         <span className="material-symbols-outlined text-[13px] text-slate-400">keyboard</span>
@@ -1146,6 +1267,7 @@ function App() {
                                                     ref={fileInputRef}
                                                     onChange={(e) => handleFileUpload(e.target.files)}
                                                     multiple
+                                                    disabled={isUploading}
                                                     accept=".pdf,.png,.jpg,.jpeg,.webp"
                                                     className="sr-only"
                                                 />
@@ -1556,16 +1678,18 @@ function App() {
 
                                     <button
                                         type="button"
-                                        disabled={selectedInvoices.length === 0}
+                                        disabled={selectedInvoices.length === 0 || isSyncing}
                                         onClick={() => {
                                             if (selectedInvoices.length === 0) return;
                                             const combinedXml = selectedInvoices.map(i => i.tallyXml).filter(Boolean).join('\n\n');
-                                            setXmlModalData({ vendor: `Batch (${selectedInvoices.length} invoices)`, invNo: 'BATCH', xml: combinedXml });
+                                            handleSyncToTally(combinedXml);
                                         }}
-                                        className={`h-8 px-3.5 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs transition-all ${selectedInvoices.length > 0 ? 'bg-blue-600 text-white hover:bg-blue-700 cursor-pointer' : 'bg-slate-100 text-slate-400 cursor-not-allowed opacity-60'}`}
+                                        className={`h-8 px-3.5 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs transition-all ${selectedInvoices.length > 0 && !isSyncing ? 'bg-blue-600 text-white hover:bg-blue-700 cursor-pointer' : 'bg-slate-100 text-slate-400 cursor-not-allowed opacity-60'}`}
                                     >
-                                        <span className="material-symbols-outlined text-[16px]">send</span>
-                                        <span>Push to TallyPrime</span>
+                                        <span className={`material-symbols-outlined text-[16px] ${isSyncing ? 'animate-spin' : ''}`}>
+                                            {isSyncing ? 'sync' : 'send'}
+                                        </span>
+                                        <span>{isSyncing ? 'Syncing...' : 'Push to TallyPrime'}</span>
                                     </button>
                                 </div>
                             </div>
@@ -1657,23 +1781,34 @@ function App() {
                                 )}
 
                                 {/* Action Footer Bar */}
-                                <div className="pt-2 border-t border-slate-200/80 flex items-center justify-between">
+                                <div className="pt-2 border-t border-slate-200/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                                     <div className="flex items-center gap-4">
-                                        <div className="flex items-center gap-1.5 opacity-70">
+                                        <div className="flex items-center gap-1.5 opacity-80">
                                             <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                                            <span className="text-[10px] font-medium text-slate-500 uppercase tracking-wider">Direct Sync to Tally (Port 9000)</span>
+                                            <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Port 9000 Ready</span>
                                         </div>
                                         <button type="button" onClick={() => setShowRawXml(!showRawXml)} className="text-[11px] text-slate-500 hover:text-slate-700 underline underline-offset-2 transition-colors">
                                             {showRawXml ? 'Hide Raw XML Code' : 'View Raw XML Code'}
                                         </button>
                                     </div>
-                                    <div className="flex items-center gap-3">
-                                        <button type="button" onClick={() => { setXmlModalData(null); setShowRawXml(false); }} className="text-xs font-medium text-slate-500 hover:text-slate-800 transition-colors">
-                                            Back to Workbench &rarr;
+                                    <div className="flex items-center gap-2.5 flex-wrap justify-end">
+                                        <button type="button" onClick={() => { setXmlModalData(null); setShowRawXml(false); }} className="text-xs font-medium text-slate-500 hover:text-slate-800 transition-colors px-2 py-1">
+                                            Back &rarr;
                                         </button>
-                                        <button type="button" onClick={handleDownloadXml} className="bg-slate-900 hover:bg-slate-800 text-white font-medium px-5 py-2.5 rounded-xl shadow-sm text-sm flex items-center gap-2 transition-colors">
+                                        <button type="button" onClick={handleDownloadXml} className="bg-slate-900 hover:bg-slate-800 text-white font-medium px-4 py-2.5 rounded-xl shadow-sm text-xs sm:text-sm flex items-center gap-2 transition-colors">
                                             <span className="material-symbols-outlined text-[18px]">download</span>
                                             <span>Download Combined Tally XML</span>
+                                        </button>
+                                        <button
+                                            type="button"
+                                            disabled={isSyncing}
+                                            onClick={() => handleSyncToTally(xmlModalData?.xml)}
+                                            className="bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white font-medium px-4 py-2.5 rounded-xl shadow-sm text-xs sm:text-sm flex items-center gap-2 transition-colors cursor-pointer"
+                                        >
+                                            <span className={`material-symbols-outlined text-[18px] ${isSyncing ? 'animate-spin' : ''}`}>
+                                                {isSyncing ? 'sync' : 'send'}
+                                            </span>
+                                            <span>{isSyncing ? 'Syncing...' : 'Direct Sync to Tally (Port 9000)'}</span>
                                         </button>
                                     </div>
                                 </div>
@@ -1751,6 +1886,27 @@ function App() {
                                     </button>
                                 </div>
                             </div>
+                        </div>
+                    )}
+
+                    {/* FLOATING TOAST NOTIFICATION */}
+                    {toast && (
+                        <div className={`fixed bottom-6 right-6 z-[100] flex items-center gap-3 px-4 py-3 rounded-xl shadow-xl border backdrop-blur transition-all duration-300 ${
+                            toast.type === 'success' 
+                                ? 'bg-emerald-900/95 text-white border-emerald-500/50 shadow-emerald-950/20' 
+                                : 'bg-rose-900/95 text-white border-rose-500/50 shadow-rose-950/20'
+                        }`}>
+                            <span className="material-symbols-outlined text-[20px]">
+                                {toast.type === 'success' ? 'check_circle' : 'error'}
+                            </span>
+                            <span className="text-xs font-semibold">{toast.message}</span>
+                            <button 
+                                type="button" 
+                                onClick={() => setToast(null)}
+                                className="ml-2 text-white/70 hover:text-white transition-colors"
+                            >
+                                <span className="material-symbols-outlined text-[16px]">close</span>
+                            </button>
                         </div>
                     )}
                 </div>
