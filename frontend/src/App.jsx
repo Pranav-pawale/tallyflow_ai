@@ -1,7 +1,179 @@
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { SignedIn, SignedOut, SignIn, UserButton, useAuth } from "@clerk/clerk-react";
 
+// Task 1: Strict Indian Date Parser
+// Parses DD-MM-YY, DD/MM/YY, DD-MM-YYYY, or DD/MM/YYYY where the first segment is ALWAYS Day (DD), second is Month (MM), and 2-digit YY maps to 20YY
+export const parseIndianDateToISO = (rawDate) => {
+    if (!rawDate) return '';
+    const s = String(rawDate).trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+    const isoSlash = s.match(/^(\d{4})[\/](\d{1,2})[\/](\d{1,2})$/);
+    if (isoSlash) return `${isoSlash[1]}-${isoSlash[2].padStart(2, '0')}-${isoSlash[3].padStart(2, '0')}`;
+    const m = s.match(/^(\d{1,2})[\-\/](\d{1,2})[\-\/](\d{2,4})$/);
+    if (m) {
+        const day = m[1].padStart(2, '0');
+        const month = m[2].padStart(2, '0');
+        let year = m[3];
+        if (year.length === 2) year = `20${year}`;
+        return `${year}-${month}-${day}`;
+    }
+    const monthNames = {
+        jan: '01', feb: '02', mar: '03', apr: '04', may: '05', jun: '06',
+        jul: '07', aug: '08', sep: '09', oct: '10', nov: '11', dec: '12'
+    };
+    const namedMatch = s.match(/^(\d{1,2})[\s\-\/]([a-zA-Z]{3,9})[\s\-\/](\d{2,4})$/);
+    if (namedMatch) {
+        const day = namedMatch[1].padStart(2, '0');
+        const monKey = namedMatch[2].toLowerCase().substring(0, 3);
+        const month = monthNames[monKey];
+        let year = namedMatch[3];
+        if (year.length === 2) year = `20${year}`;
+        if (month) return `${year}-${month}-${day}`;
+    }
+    return s;
+};
 
+// Task 1: Format ISO date strictly to Tally XML YYYYMMDD by stripping hyphens (NEVER new Date().getFullYear())
+export const formatDateForTallyXML = (isoDateStr) => {
+    if (!isoDateStr) return '';
+    const iso = parseIndianDateToISO(isoDateStr);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(iso)) return iso.replace(/-/g, '');
+    const clean = String(iso).replace(/[-\/\s]/g, '');
+    return clean;
+};
+
+// Helper: Combine multiple Tally voucher XMLs into a single valid Tally XML document
+export const combineTallyXmlList = (xmlList) => {
+    const validXmls = (xmlList || []).filter(Boolean);
+    if (validXmls.length === 0) return '';
+    if (validXmls.length === 1) return validXmls[0];
+
+    const allMessages = [];
+    validXmls.forEach(xml => {
+        const matches = xml.match(/<TALLYMESSAGE[\s\S]*?<\/TALLYMESSAGE>/gi);
+        if (matches) {
+            allMessages.push(...matches);
+        }
+    });
+
+    if (allMessages.length === 0) return validXmls.join('\n\n');
+
+    return `<?xml version="1.0" encoding="UTF-8"?>\n<ENVELOPE>\n  <HEADER>\n    <TALLYREQUEST>Import Data</TALLYREQUEST>\n  </HEADER>\n  <BODY>\n    <IMPORTDATA>\n      <REQUESTDESC>\n        <REPORTNAME>All Masters</REPORTNAME>\n      </REQUESTDESC>\n      <REQUESTDATA>\n${allMessages.map(m => '        ' + m.trim()).join('\n')}\n      </REQUESTDATA>\n    </IMPORTDATA>\n  </BODY>\n</ENVELOPE>`;
+};
+
+// Utility: Indian 2-Digit GSTIN State Code Lookup Map (Task 2)
+export const GSTIN_STATE_MAP = {
+    "01": "Jammu & Kashmir",
+    "02": "Himachal Pradesh",
+    "03": "Punjab",
+    "04": "Chandigarh",
+    "05": "Uttarakhand",
+    "06": "Haryana",
+    "07": "Delhi",
+    "08": "Rajasthan",
+    "09": "Uttar Pradesh",
+    "10": "Bihar",
+    "11": "Sikkim",
+    "12": "Arunachal Pradesh",
+    "13": "Nagaland",
+    "14": "Manipur",
+    "15": "Mizoram",
+    "16": "Tripura",
+    "17": "Meghalaya",
+    "18": "Assam",
+    "19": "West Bengal",
+    "20": "Jharkhand",
+    "21": "Odisha",
+    "22": "Chhattisgarh",
+    "23": "Madhya Pradesh",
+    "24": "Gujarat",
+    "26": "Dadra & Nagar Haveli and Daman & Diu",
+    "27": "Maharashtra",
+    "29": "Karnataka",
+    "30": "Goa",
+    "31": "Lakshadweep",
+    "32": "Kerala",
+    "33": "Tamil Nadu",
+    "34": "Puducherry",
+    "35": "Andaman & Nicobar Islands",
+    "36": "Telangana",
+    "37": "Andhra Pradesh",
+    "38": "Ladakh",
+    "97": "Other Territory"
+};
+
+export const getStateFromGstin = (gstin, fallback = '') => {
+    if (gstin && typeof gstin === 'string') {
+        const clean = gstin.trim().toUpperCase();
+        const code = clean.slice(0, 2);
+        if (GSTIN_STATE_MAP[code]) {
+            return GSTIN_STATE_MAP[code];
+        }
+    }
+    return fallback || '';
+};
+
+// Utility: Dynamically compute Tally EDU / Current FY safe date (Task 1)
+// - Clamps into target Financial Year (April 1 of targetFY to March 31 of targetFY + 1).
+// - Preserves original month where possible.
+// - Snaps Day (DD) to nearest Tally EDU allowed day ('01' or '02').
+// ZERO HARDCODING.
+export const getTallyEduSafeDate = (isoDateStr, targetFYStartYear) => {
+    const currentYear = new Date().getFullYear();
+    const fyStartYear = Number(targetFYStartYear) || currentYear;
+    
+    const iso = parseIndianDateToISO(isoDateStr);
+    let origMonth = 4;
+    let origDay = 1;
+    
+    if (iso && /^\d{4}-\d{2}-\d{2}$/.test(iso)) {
+        const parts = iso.split('-').map(Number);
+        origMonth = parts[1];
+        origDay = parts[2];
+    }
+    
+    // Snaps Day to nearest Tally EDU allowed day ('01' or '02')
+    const allowedDays = [1, 2];
+    const snappedDay = allowedDays.reduce((prev, curr) => 
+        Math.abs(curr - origDay) < Math.abs(prev - origDay) ? curr : prev
+    );
+    const dayStr = String(snappedDay).padStart(2, '0');
+    
+    // Indian FY: April (04) to December (12) belong to fyStartYear.
+    // January (01) to March (03) belong to fyStartYear + 1.
+    const validMonth = (origMonth >= 1 && origMonth <= 12) ? origMonth : 4;
+    const yearForMonth = (validMonth >= 4) ? fyStartYear : (fyStartYear + 1);
+    const monthStr = String(validMonth).padStart(2, '0');
+    
+    return `${yearForMonth}-${monthStr}-${dayStr}`;
+};
+
+// Helper: Dynamically adapt Tally XML dates for Tally EDU / Target FY mode (Task 1)
+export const applyEduModeToXml = (xmlString, targetFYStartYear) => {
+    if (!xmlString) return '';
+    const replaceDateTag = (tagName) => (match, y, m, d) => {
+        const safeIso = getTallyEduSafeDate(`${y}-${m}-${d}`, targetFYStartYear);
+        const safeFormatted = safeIso.replace(/-/g, '');
+        return `<${tagName}>${safeFormatted}</${tagName}>`;
+    };
+    return xmlString
+        .replace(/<DATE>(\d{4})(\d{2})(\d{2})<\/DATE>/g, replaceDateTag('DATE'))
+        .replace(/<EFFECTIVEDATE>(\d{4})(\d{2})(\d{2})<\/EFFECTIVEDATE>/g, replaceDateTag('EFFECTIVEDATE'));
+};
+
+export const applySafeDateToXml = (xmlString, targetIsoDateOrFY) => {
+    if (!xmlString) return '';
+    if (typeof targetIsoDateOrFY === 'number' || /^\d{4}$/.test(String(targetIsoDateOrFY || '').trim())) {
+        return applyEduModeToXml(xmlString, Number(targetIsoDateOrFY));
+    }
+    if (typeof targetIsoDateOrFY === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(targetIsoDateOrFY.trim())) {
+        const formatted = formatDateForTallyXML(targetIsoDateOrFY);
+        return xmlString
+            .replace(/<DATE>\d{8}<\/DATE>/g, `<DATE>${formatted}</DATE>`)
+            .replace(/<EFFECTIVEDATE>\d{8}<\/EFFECTIVEDATE>/g, `<EFFECTIVEDATE>${formatted}</EFFECTIVEDATE>`);
+    }
+    return applyEduModeToXml(xmlString);
+};
 
 function App() {
     const { getToken, isSignedIn } = useAuth();
@@ -13,6 +185,12 @@ function App() {
     const [errorAlert, setErrorAlert] = useState(null);
     const [xmlModalData, setXmlModalData] = useState(null);
     const [showRawXml, setShowRawXml] = useState(false);
+    const [showTallyImportGuide, setShowTallyImportGuide] = useState(false);
+    const [useEduDate, setUseEduDate] = useState(false);
+    const [targetFY, setTargetFY] = useState(() => {
+        const now = new Date();
+        return now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
+    });
     const [copyLabel, setCopyLabel] = useState('Copy XML');
     const [isSyncing, setIsSyncing] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
@@ -46,7 +224,11 @@ function App() {
                 });
                 const result = await response.json();
                 if (result.success) {
-                    setInvoices(result.data);
+                    const normalized = (result.data || []).map(inv => ({
+                        ...inv,
+                        invoiceDate: parseIndianDateToISO(inv.invoiceDate || inv.invoice_date || '')
+                    }));
+                    setInvoices(normalized);
                 }
             } catch (err) {
                 console.error('Error fetching invoices:', err);
@@ -228,6 +410,8 @@ function App() {
             const extractedRawList = resData.data || [];
             const extractedList = extractedRawList.map((inv, idx) => ({
                 ...inv,
+                // Task 1: Normalize Indian date format to ISO for <input type="date">
+                invoiceDate: parseIndianDateToISO(inv.invoiceDate || ''),
                 fileUrl: fileMap.get(inv.fileName) || tempRows[idx]?.fileUrl || null
             }));
 
@@ -404,7 +588,8 @@ function App() {
     // Copy & Download XML Modal
     const handleCopyXml = () => {
         if (!xmlModalData?.xml) return;
-        navigator.clipboard.writeText(xmlModalData.xml).then(() => {
+        const finalXml = useEduDate ? applyEduModeToXml(xmlModalData.xml, targetFY) : xmlModalData.xml;
+        navigator.clipboard.writeText(finalXml).then(() => {
             setCopyLabel('Copied!');
             setTimeout(() => setCopyLabel('Copy XML'), 2000);
         });
@@ -412,7 +597,8 @@ function App() {
 
     const handleDownloadXml = () => {
         if (!xmlModalData?.xml) return;
-        const blob = new Blob([xmlModalData.xml], { type: 'application/xml' });
+        const finalXml = useEduDate ? applyEduModeToXml(xmlModalData.xml, targetFY) : xmlModalData.xml;
+        const blob = new Blob([finalXml], { type: 'application/xml' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
@@ -963,7 +1149,7 @@ function App() {
 
                                                 <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-200/70">
                                                     <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider block mb-0.5">Invoice Date</span>
-                                                    <input type="date" className="w-full bg-white border border-slate-200 rounded px-2 py-1 text-[13px] font-mono font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500" value={activeReviewInvoice?.invoiceDate || ''} onChange={(e) => handleInvoiceChange('invoiceDate', e.target.value)} />
+                                                    <input type="date" className="w-full bg-white border border-slate-200 rounded px-2 py-1 text-[13px] font-mono font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500" value={parseIndianDateToISO(activeReviewInvoice?.invoiceDate) || ''} onChange={(e) => handleInvoiceChange('invoiceDate', e.target.value)} />
                                                 </div>
 
                                                 <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-200/70">
@@ -971,6 +1157,81 @@ function App() {
                                                     <input type="text" className="w-full bg-white border border-slate-200 rounded px-2 py-1 text-[13px] font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500" value={activeReviewInvoice?.voucherType || ''} onChange={(e) => handleInvoiceChange('voucherType', e.target.value)} placeholder="Purchase Voucher" />
                                                 </div>
                                             </div>
+
+                                            {/* GST & Logistics Metadata: Reverse Charge, Order No, Vehicle No */}
+                                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs mb-2.5">
+                                                <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-200/70">
+                                                    <div className="flex items-center justify-between mb-0.5">
+                                                        <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Reverse Charge (RCM)</span>
+                                                        <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
+                                                            String(activeReviewInvoice?.reverseCharge || 'NO').toUpperCase() === 'YES'
+                                                                ? 'bg-amber-100 text-amber-800 border border-amber-300'
+                                                                : 'bg-slate-200 text-slate-600'
+                                                        }`}>
+                                                            {String(activeReviewInvoice?.reverseCharge || 'NO').toUpperCase()}
+                                                        </span>
+                                                    </div>
+                                                    <select
+                                                        className="w-full bg-white border border-slate-200 rounded px-2 py-1 text-xs font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                                                        value={String(activeReviewInvoice?.reverseCharge || 'NO').toUpperCase()}
+                                                        onChange={(e) => handleInvoiceChange('reverseCharge', e.target.value)}
+                                                    >
+                                                        <option value="NO">NO (Standard Supply)</option>
+                                                        <option value="YES">YES (Reverse Charge Applicable)</option>
+                                                    </select>
+                                                </div>
+
+                                                <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-200/70">
+                                                    <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider block mb-0.5">Buyer's Order No</span>
+                                                    <input
+                                                        type="text"
+                                                        className="w-full bg-white border border-slate-200 rounded px-2 py-1 text-xs font-mono font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                                                        value={activeReviewInvoice?.buyerOrderNo || ''}
+                                                        onChange={(e) => handleInvoiceChange('buyerOrderNo', e.target.value)}
+                                                        placeholder="e.g. B4589"
+                                                    />
+                                                </div>
+
+                                                <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-200/70">
+                                                    <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider block mb-0.5">Vehicle Number</span>
+                                                    <input
+                                                        type="text"
+                                                        className="w-full bg-white border border-slate-200 rounded px-2 py-1 text-xs font-mono font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                                                        value={activeReviewInvoice?.vehicleNo || activeReviewInvoice?.vehicleNumber || ''}
+                                                        onChange={(e) => {
+                                                            handleInvoiceChange('vehicleNo', e.target.value);
+                                                            handleInvoiceChange('vehicleNumber', e.target.value);
+                                                        }}
+                                                        placeholder="e.g. V1456"
+                                                    />
+                                                </div>
+                                            </div>
+
+                                            {/* Buyer / Consignee Details if available */}
+                                            {(activeReviewInvoice?.buyerName || activeReviewInvoice?.buyerGstin) && (
+                                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs mb-2.5">
+                                                    <div className="bg-slate-50 p-2 rounded-lg border border-slate-200/70">
+                                                        <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider block mb-0.5">Buyer (Bill To / Consignee)</span>
+                                                        <input
+                                                            type="text"
+                                                            className="w-full bg-white border border-slate-200 rounded px-2 py-1 text-xs font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                                                            value={activeReviewInvoice?.buyerName || ''}
+                                                            onChange={(e) => handleInvoiceChange('buyerName', e.target.value)}
+                                                            placeholder="Buyer Name"
+                                                        />
+                                                    </div>
+                                                    <div className="bg-slate-50 p-2 rounded-lg border border-slate-200/70">
+                                                        <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider block mb-0.5">Buyer GSTIN</span>
+                                                        <input
+                                                            type="text"
+                                                            className="w-full bg-white border border-slate-200 rounded px-2 py-1 text-xs font-mono font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                                                            value={activeReviewInvoice?.buyerGstin || ''}
+                                                            onChange={(e) => handleInvoiceChange('buyerGstin', e.target.value)}
+                                                            placeholder="Buyer GSTIN"
+                                                        />
+                                                    </div>
+                                                </div>
+                                            )}
 
                                             <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-200/70 text-xs">
                                                 <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider block mb-0.5">Narration</span>
@@ -1000,7 +1261,8 @@ function App() {
                                                         <tr>
                                                             <th className="px-3 py-1.5">Description / Ledger</th>
                                                             <th className="px-2 py-1.5 text-center">HSN/SAC</th>
-                                                            <th className="px-2 py-1.5 text-right">Qty</th>
+                                                            <th className="px-2 py-1.5 text-center">GST %</th>
+                                                            <th className="px-2 py-1.5 text-right">Qty / UOM</th>
                                                             <th className="px-2 py-1.5 text-right">Rate (₹)</th>
                                                             <th className="px-3 py-1.5 text-right">Taxable Value</th>
                                                         </tr>
@@ -1015,8 +1277,26 @@ function App() {
                                                                 <td className="px-2 py-2 text-center text-slate-600 font-mono">
                                                                     <input type="text" className="w-full bg-white border border-slate-200 rounded px-1 py-0.5 text-center focus:outline-none focus:ring-1 focus:ring-emerald-500 text-xs" value={activeReviewInvoice?.hsnCode || ''} onChange={(e) => handleInvoiceChange('hsnCode', e.target.value)} placeholder="HSN" />
                                                                 </td>
+                                                                <td className="px-2 py-2 text-center">
+                                                                    {(() => {
+                                                                        const taxable = safeNum(activeReviewInvoice?.taxableAmount);
+                                                                        const totalTax = safeNum(activeReviewInvoice?.taxBreakdown?.cgst) + safeNum(activeReviewInvoice?.taxBreakdown?.sgst) + safeNum(activeReviewInvoice?.taxBreakdown?.igst);
+                                                                        const rate = taxable > 0 ? Math.round((totalTax / taxable) * 100) : 0;
+                                                                        return (
+                                                                            <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-violet-50 text-violet-700 border border-violet-200/70">
+                                                                                {rate}%
+                                                                            </span>
+                                                                        );
+                                                                    })()}
+                                                                </td>
                                                                 <td className="px-2 py-2 text-right text-slate-800 font-semibold font-mono">
-                                                                    <input type="number" className="w-16 bg-white border border-slate-200 rounded px-1 py-0.5 text-right focus:outline-none focus:ring-1 focus:ring-emerald-500 text-xs" value={activeReviewInvoice?.quantity || ''} onChange={(e) => handleInvoiceChange('quantity', safeNum(e.target.value))} />
+                                                                    <div className="flex items-center justify-end gap-1">
+                                                                        <input type="number" className="w-14 bg-white border border-slate-200 rounded px-1 py-0.5 text-right focus:outline-none focus:ring-1 focus:ring-emerald-500 text-xs" value={activeReviewInvoice?.quantity || ''} onChange={(e) => handleInvoiceChange('quantity', safeNum(e.target.value))} />
+                                                                        <input type="text" className="w-12 bg-white border border-slate-200 rounded px-1 py-0.5 text-center text-[11px] font-sans font-semibold text-slate-600 focus:outline-none focus:ring-1 focus:ring-emerald-500" value={activeReviewInvoice?.uom || activeReviewInvoice?.unit || 'Nos'} onChange={(e) => {
+                                                                            handleInvoiceChange('uom', e.target.value);
+                                                                            handleInvoiceChange('unit', e.target.value);
+                                                                        }} placeholder="UOM" />
+                                                                    </div>
                                                                 </td>
                                                                 <td className="px-2 py-2 text-right text-slate-600 font-mono">
                                                                     {formatINR(activeReviewInvoice?.taxableAmount ? (activeReviewInvoice.taxableAmount / (activeReviewInvoice.quantity || 1)) : 0)}
@@ -1043,12 +1323,49 @@ function App() {
                                                                             handleInvoiceChange('items', newItems);
                                                                         }} placeholder="HSN" />
                                                                     </td>
+                                                                    <td className="px-2 py-2 text-center">
+                                                                        {(() => {
+                                                                            const explicitRate = item.gst_rate ?? item.tax_rate ?? (item.cgst_rate && item.sgst_rate ? (safeNum(item.cgst_rate) + safeNum(item.sgst_rate)) : item.igst_rate);
+                                                                            let rateVal = null;
+                                                                            if (explicitRate != null && safeNum(explicitRate) > 0) {
+                                                                                rateVal = safeNum(explicitRate);
+                                                                            } else {
+                                                                                const tv = safeNum(item.taxable_value);
+                                                                                const itemTax = safeNum(item.gst_amount) || (safeNum(item.cgst_amount) + safeNum(item.sgst_amount) + safeNum(item.igst_amount));
+                                                                                const calc = tv > 0 && itemTax > 0 ? Math.round((itemTax / tv) * 100) : 0;
+                                                                                if (calc > 0) rateVal = calc;
+                                                                            }
+
+                                                                            if (rateVal != null) {
+                                                                                const colorClass = rateVal === 12
+                                                                                    ? 'bg-blue-50 text-blue-700 border-blue-200/70'
+                                                                                    : rateVal === 18
+                                                                                    ? 'bg-purple-50 text-purple-700 border-purple-200/70'
+                                                                                    : rateVal === 5
+                                                                                    ? 'bg-amber-50 text-amber-700 border-amber-200/70'
+                                                                                    : 'bg-emerald-50 text-emerald-700 border-emerald-200/70';
+                                                                                return (
+                                                                                    <span className={`inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-bold border ${colorClass}`}>
+                                                                                        {rateVal}%
+                                                                                    </span>
+                                                                                );
+                                                                            }
+                                                                            return <span className="text-[10px] text-slate-400">—</span>;
+                                                                        })()}
+                                                                    </td>
                                                                     <td className="px-2 py-2 text-right text-slate-800 font-semibold font-mono">
-                                                                        <input type="number" className="w-16 bg-white border border-slate-200 rounded px-1 py-0.5 text-right focus:outline-none focus:ring-1 focus:ring-emerald-500 text-xs" value={item.quantity || ''} onChange={(e) => {
-                                                                            const newItems = [...(activeReviewInvoice.items || [])];
-                                                                            newItems[index] = { ...newItems[index], quantity: safeNum(e.target.value) };
-                                                                            handleInvoiceChange('items', newItems);
-                                                                        }} />
+                                                                        <div className="flex items-center justify-end gap-1">
+                                                                            <input type="number" className="w-14 bg-white border border-slate-200 rounded px-1 py-0.5 text-right focus:outline-none focus:ring-1 focus:ring-emerald-500 text-xs" value={item.quantity || ''} onChange={(e) => {
+                                                                                const newItems = [...(activeReviewInvoice.items || [])];
+                                                                                newItems[index] = { ...newItems[index], quantity: safeNum(e.target.value) };
+                                                                                handleInvoiceChange('items', newItems);
+                                                                            }} />
+                                                                            <input type="text" className="w-12 bg-white border border-slate-200 rounded px-1 py-0.5 text-center text-[11px] font-sans font-semibold text-slate-600 focus:outline-none focus:ring-1 focus:ring-emerald-500" value={item.uom || item.unit || 'Nos'} onChange={(e) => {
+                                                                                const newItems = [...(activeReviewInvoice.items || [])];
+                                                                                newItems[index] = { ...newItems[index], uom: e.target.value, unit: e.target.value };
+                                                                                handleInvoiceChange('items', newItems);
+                                                                            }} placeholder="UOM" />
+                                                                        </div>
                                                                     </td>
                                                                     <td className="px-2 py-2 text-right text-slate-600 font-mono">
                                                                         <input type="number" className="w-20 bg-white border border-slate-200 rounded px-1 py-0.5 text-right focus:outline-none focus:ring-1 focus:ring-emerald-500 text-xs" value={item.rate || ''} onChange={(e) => {
@@ -1667,7 +1984,7 @@ function App() {
                                         disabled={selectedInvoices.length === 0}
                                         onClick={() => {
                                             if (selectedInvoices.length === 0) return;
-                                            const combinedXml = selectedInvoices.map(i => i.tallyXml).filter(Boolean).join('\n\n');
+                                            const combinedXml = combineTallyXmlList(selectedInvoices.map(i => i.tallyXml));
                                             setXmlModalData({ vendor: `Batch (${selectedInvoices.length} invoices)`, invNo: 'BATCH', xml: combinedXml });
                                         }}
                                         className={`h-8 px-3.5 rounded-lg text-xs font-medium inline-flex items-center gap-1.5 shadow-xs transition-all ${selectedInvoices.length > 0 ? 'bg-slate-900 text-white hover:bg-slate-800 cursor-pointer' : 'bg-slate-100 text-slate-400 cursor-not-allowed opacity-60'}`}
@@ -1678,18 +1995,27 @@ function App() {
 
                                     <button
                                         type="button"
-                                        disabled={selectedInvoices.length === 0 || isSyncing}
+                                        disabled={selectedInvoices.length === 0}
                                         onClick={() => {
                                             if (selectedInvoices.length === 0) return;
-                                            const combinedXml = selectedInvoices.map(i => i.tallyXml).filter(Boolean).join('\n\n');
-                                            handleSyncToTally(combinedXml);
+                                            // Task 5: Download the batch XML file and show import guide
+                                            let combinedXml = combineTallyXmlList(selectedInvoices.map(i => i.tallyXml));
+                                            if (useEduDate) {
+                                                combinedXml = applyEduModeToXml(combinedXml, targetFY);
+                                            }
+                                            const blob = new Blob([combinedXml], { type: 'application/xml' });
+                                            const url = URL.createObjectURL(blob);
+                                            const a = document.createElement('a');
+                                            a.href = url;
+                                            a.download = `tally_voucher_BATCH.xml`;
+                                            a.click();
+                                            URL.revokeObjectURL(url);
+                                            setShowTallyImportGuide(true);
                                         }}
-                                        className={`h-8 px-3.5 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs transition-all ${selectedInvoices.length > 0 && !isSyncing ? 'bg-blue-600 text-white hover:bg-blue-700 cursor-pointer' : 'bg-slate-100 text-slate-400 cursor-not-allowed opacity-60'}`}
+                                        className={`h-8 px-3.5 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs transition-all ${selectedInvoices.length > 0 ? 'bg-blue-600 text-white hover:bg-blue-700 cursor-pointer' : 'bg-slate-100 text-slate-400 cursor-not-allowed opacity-60'}`}
                                     >
-                                        <span className={`material-symbols-outlined text-[16px] ${isSyncing ? 'animate-spin' : ''}`}>
-                                            {isSyncing ? 'sync' : 'send'}
-                                        </span>
-                                        <span>{isSyncing ? 'Syncing...' : 'Push to TallyPrime'}</span>
+                                        <span className="material-symbols-outlined text-[16px]">send</span>
+                                        <span>Push to TallyPrime</span>
                                     </button>
                                 </div>
                             </div>
@@ -1771,11 +2097,51 @@ function App() {
                                     </div>
                                 )}
 
+                                {/* Dynamic Tally EDU / Current FY Compatibility Mode Toggle */}
+                                <div className="bg-amber-50/70 border border-amber-200/80 rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs">
+                                    <div className="flex items-center gap-2.5">
+                                        <span className="material-symbols-outlined text-amber-600 text-[18px] shrink-0">school</span>
+                                        <div>
+                                            <div className="font-semibold text-slate-900">Tally EDU / Current FY Compatibility Mode</div>
+                                            <div className="text-[11px] text-slate-500">
+                                                {useEduDate
+                                                    ? `Clamping dates to FY ${targetFY}-${String(targetFY + 1).slice(-2)} (Apr 1–Mar 31) & snapping day to 01/02 for Tally EDU`
+                                                    : 'Outputting exact extracted invoice dates (zero modification)'}
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div className="flex items-center gap-3 shrink-0">
+                                        <label className="flex items-center gap-1.5 cursor-pointer font-medium text-slate-700">
+                                            <input
+                                                type="checkbox"
+                                                checked={useEduDate}
+                                                onChange={(e) => setUseEduDate(e.target.checked)}
+                                                className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 h-4 w-4 cursor-pointer"
+                                            />
+                                            <span className="text-[11px] font-semibold">Enable Safe FY Mode</span>
+                                        </label>
+                                        {useEduDate && (
+                                            <div className="flex items-center gap-1.5 bg-white border border-amber-300 rounded-lg px-2.5 py-1 shadow-2xs">
+                                                <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Target FY Start:</span>
+                                                <input
+                                                    type="number"
+                                                    min="2000"
+                                                    max="2099"
+                                                    className="w-14 text-xs font-mono font-bold text-slate-800 focus:outline-none"
+                                                    value={targetFY}
+                                                    onChange={(e) => setTargetFY(Number(e.target.value) || new Date().getFullYear())}
+                                                />
+                                                <span className="text-[11px] font-mono text-amber-700 font-semibold">(FY {targetFY}-{String(targetFY + 1).slice(-2)})</span>
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+
                                 {/* Raw XML Toggle */}
                                 {showRawXml && (
                                     <div className="flex-1 overflow-y-auto bg-slate-950 rounded-xl p-4 border border-slate-800">
                                         <pre className="xml-code text-sky-300 font-mono text-[11px] leading-relaxed whitespace-pre-wrap break-all">
-                                            {xmlModalData.xml}
+                                            {useEduDate ? applyEduModeToXml(xmlModalData.xml, targetFY) : xmlModalData.xml}
                                         </pre>
                                     </div>
                                 )}
@@ -1801,14 +2167,25 @@ function App() {
                                         </button>
                                         <button
                                             type="button"
-                                            disabled={isSyncing}
-                                            onClick={() => handleSyncToTally(xmlModalData?.xml)}
-                                            className="bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white font-medium px-4 py-2.5 rounded-xl shadow-sm text-xs sm:text-sm flex items-center gap-2 transition-colors cursor-pointer"
+                                            onClick={() => {
+                                                // Task 5: Download batch XML + show import guide
+                                                if (!xmlModalData?.xml) return;
+                                                const finalXml = useEduDate ? applyEduModeToXml(xmlModalData.xml, targetFY) : xmlModalData.xml;
+                                                const blob = new Blob([finalXml], { type: 'application/xml' });
+                                                const url = URL.createObjectURL(blob);
+                                                const a = document.createElement('a');
+                                                a.href = url;
+                                                a.download = `tally_voucher_BATCH.xml`;
+                                                a.click();
+                                                URL.revokeObjectURL(url);
+                                                setXmlModalData(null);
+                                                setShowRawXml(false);
+                                                setShowTallyImportGuide(true);
+                                            }}
+                                            className="bg-blue-600 hover:bg-blue-700 text-white font-medium px-4 py-2.5 rounded-xl shadow-sm text-xs sm:text-sm flex items-center gap-2 transition-colors cursor-pointer"
                                         >
-                                            <span className={`material-symbols-outlined text-[18px] ${isSyncing ? 'animate-spin' : ''}`}>
-                                                {isSyncing ? 'sync' : 'send'}
-                                            </span>
-                                            <span>{isSyncing ? 'Syncing...' : 'Direct Sync to Tally (Port 9000)'}</span>
+                                            <span className="material-symbols-outlined text-[18px]">send</span>
+                                            <span>Direct Sync to Tally (Port 9000)</span>
                                         </button>
                                     </div>
                                 </div>
@@ -1843,12 +2220,12 @@ function App() {
                                     <div className="grid grid-cols-2 gap-3">
                                         <div className="bg-slate-50 p-3 rounded-xl border border-slate-200/80">
                                             <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider block mb-1">Invoice Total</span>
-                                            <span className="font-mono text-xs font-bold text-slate-900">{formatINR(activeReviewInvoice?.totalAmount)}</span>
+                                            <span className="font-mono text-xs font-bold text-slate-900">{formatINR(computedNetTotal)}</span>
                                         </div>
                                         <div className="bg-slate-50 p-3 rounded-xl border border-slate-200/80">
                                             <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider block mb-1">Total Tax</span>
                                             <span className="font-mono text-xs font-bold text-slate-900">
-                                                {formatINR((activeReviewInvoice?.taxBreakdown?.cgst || 0) + (activeReviewInvoice?.taxBreakdown?.sgst || 0) + (activeReviewInvoice?.taxBreakdown?.igst || 0))}
+                                                {formatINR(computedTotalTax)}
                                             </span>
                                         </div>
                                     </div>
@@ -1867,6 +2244,24 @@ function App() {
                                             <span className="text-slate-500">GSTIN Match:</span>
                                             <span className="font-mono font-semibold text-slate-800">{activeReviewInvoice?.gstin || 'N/A'}</span>
                                         </div>
+                                        {activeReviewInvoice?.reverseCharge && (
+                                            <div className="flex items-center justify-between text-xs py-1 border-b border-slate-200/60">
+                                                <span className="text-slate-500">Reverse Charge (RCM):</span>
+                                                <span className="font-semibold text-slate-800">{String(activeReviewInvoice.reverseCharge).toUpperCase()}</span>
+                                            </div>
+                                        )}
+                                        {activeReviewInvoice?.buyerOrderNo && (
+                                            <div className="flex items-center justify-between text-xs py-1 border-b border-slate-200/60">
+                                                <span className="text-slate-500">Buyer's Order No:</span>
+                                                <span className="font-mono font-semibold text-slate-800">{activeReviewInvoice.buyerOrderNo}</span>
+                                            </div>
+                                        )}
+                                        {(activeReviewInvoice?.vehicleNo || activeReviewInvoice?.vehicleNumber) && (
+                                            <div className="flex items-center justify-between text-xs py-1 border-b border-slate-200/60">
+                                                <span className="text-slate-500">Vehicle Number:</span>
+                                                <span className="font-mono font-semibold text-slate-800">{activeReviewInvoice.vehicleNo || activeReviewInvoice.vehicleNumber}</span>
+                                            </div>
+                                        )}
                                         <div className="flex items-center justify-between text-xs py-1">
                                             <span className="text-slate-500">Arithmetic Integrity:</span>
                                             <span className={`font-semibold ${activeReviewInvoice?.mathDifference === 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
@@ -1883,6 +2278,59 @@ function App() {
                                         className="px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-medium transition-colors shadow-xs"
                                     >
                                         Close
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* TASK 5: TALLY IMPORT GUIDE MODAL */}
+                    {showTallyImportGuide && (
+                        <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4">
+                            <div className="bg-white border border-slate-200 shadow-2xl rounded-2xl p-6 max-w-md w-full text-slate-800 space-y-5">
+                                <div className="flex items-center justify-between">
+                                    <div className="flex items-center gap-2.5">
+                                        <div className="w-8 h-8 rounded-full bg-emerald-100 flex items-center justify-center">
+                                            <span className="material-symbols-outlined text-emerald-600 text-[18px]">check_circle</span>
+                                        </div>
+                                        <h3 className="text-sm font-bold text-slate-900 font-heading">Ready for TallyPrime Import</h3>
+                                    </div>
+                                    <button type="button" onClick={() => setShowTallyImportGuide(false)} className="text-slate-400 hover:text-slate-700 transition-colors">
+                                        <span className="material-symbols-outlined text-[18px]">close</span>
+                                    </button>
+                                </div>
+
+                                <div className="space-y-3">
+                                    <div className="flex gap-3 items-start bg-emerald-50/60 border border-emerald-200/80 rounded-xl p-3.5">
+                                        <div className="w-6 h-6 rounded-full bg-emerald-200 flex items-center justify-center shrink-0 text-emerald-800 text-xs font-bold">1</div>
+                                        <div className="text-xs text-slate-700 leading-relaxed">
+                                            <span className="font-semibold text-slate-900">tally_voucher_BATCH.xml</span> has been downloaded to your PC.
+                                        </div>
+                                    </div>
+                                    <div className="flex gap-3 items-start bg-amber-50/60 border border-amber-200/80 rounded-xl p-3.5">
+                                        <div className="w-6 h-6 rounded-full bg-amber-200 flex items-center justify-center shrink-0 text-amber-800 text-xs font-bold">2</div>
+                                        <div className="text-xs text-slate-700 leading-relaxed">
+                                            <span className="font-semibold text-slate-900">First time in a new company?</span> In TallyPrime, press <kbd className="px-1.5 py-0.5 rounded bg-slate-100 border border-slate-200 font-mono text-[11px] font-semibold text-slate-700 shadow-2xs">Alt + O</kbd> (Import) → <span className="font-semibold">Masters</span> and select this file to auto-create all vendor, purchase, and GST tax ledgers.
+                                        </div>
+                                    </div>
+                                    <div className="flex gap-3 items-start bg-indigo-50/60 border border-indigo-200/80 rounded-xl p-3.5">
+                                        <div className="w-6 h-6 rounded-full bg-indigo-200 flex items-center justify-center shrink-0 text-indigo-800 text-xs font-bold">3</div>
+                                        <div className="text-xs text-slate-700 leading-relaxed">
+                                            Next, press <kbd className="px-1.5 py-0.5 rounded bg-slate-100 border border-slate-200 font-mono text-[11px] font-semibold text-slate-700 shadow-2xs">Alt + O</kbd> (Import) → <span className="font-semibold">Transactions</span> on the same XML file to import all purchase vouchers.
+                                        </div>
+                                    </div>
+                                    <div className="text-[11px] text-slate-500 italic px-1">
+                                        * Note: If ledgers already exist in your company, you can directly import Transactions (Step 3).
+                                    </div>
+                                </div>
+
+                                <div className="pt-2 border-t border-slate-200/80 flex items-center justify-end">
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowTallyImportGuide(false)}
+                                        className="px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-medium transition-colors shadow-xs"
+                                    >
+                                        Got it, Close
                                     </button>
                                 </div>
                             </div>
