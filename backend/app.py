@@ -188,8 +188,6 @@ with st.sidebar:
         st.success("Settings saved successfully!")
         st.rerun()
 
-    st.markdown("---")
-    safe_edu = st.checkbox("🎓 Educational Mode Date Clamp", value=True, help="Clamps invoice date to the 1st of month (YYYYMM01) for Tally Prime Educational Mode compatibility")
     st.caption("v1.0.0 | Engine Powered by Gemini 2.5 Flash")
 
 # Metrics Banner
@@ -482,7 +480,6 @@ with tab_export:
     with col_e1:
         st.write(f"• **Verified Invoices Ready for Export:** `{len(verified_invoices)}`")
         st.write(f"• **Total Processed Invoices:** `{len(invoices)}`")
-        st.write(f"• **Educational Mode Clamp:** `{'Enabled (1st of month)' if safe_edu else 'Disabled (Original date)'}`")
 
     with col_e2:
         export_mode = st.radio("Export Target", ["Only Verified Invoices", "All Invoices (Inc. Needs Review)"])
@@ -497,7 +494,7 @@ with tab_export:
         else:
             try:
                 output_path = engine.EXPORTS_DIR / "import_ready.xml"
-                result_path = engine.export_batch_to_tally_xml(export_ids, output_path=str(output_path), safe_edu=safe_edu)
+                result_path = engine.export_batch_to_tally_xml(export_ids, output_path=str(output_path))
                 
                 st.success(f"🎉 Tally XML Exported successfully to `{result_path}`!")
                 

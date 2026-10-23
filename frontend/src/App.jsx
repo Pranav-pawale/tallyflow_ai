@@ -1,64 +1,204 @@
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { SignedIn, SignedOut, SignIn, UserButton, useAuth } from "@clerk/clerk-react";
 
-// Task 1: Strict Indian Date Parser
-// Parses DD-MM-YY, DD/MM/YY, DD-MM-YYYY, or DD/MM/YYYY where the first segment is ALWAYS Day (DD), second is Month (MM), and 2-digit YY maps to 20YY
-export const parseIndianDateToISO = (rawDate) => {
-    if (!rawDate) return '';
-    const s = String(rawDate).trim();
-    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-    const isoSlash = s.match(/^(\d{4})[\/](\d{1,2})[\/](\d{1,2})$/);
-    if (isoSlash) return `${isoSlash[1]}-${isoSlash[2].padStart(2, '0')}-${isoSlash[3].padStart(2, '0')}`;
-    const m = s.match(/^(\d{1,2})[\-\/](\d{1,2})[\-\/](\d{2,4})$/);
-    if (m) {
-        const day = m[1].padStart(2, '0');
-        const month = m[2].padStart(2, '0');
-        let year = m[3];
-        if (year.length === 2) year = `20${year}`;
-        return `${year}-${month}-${day}`;
+// Utility: Comprehensive Date Parser that parses ISO, Indian (DD-MM-YYYY), slash, and 8-digit formats
+export const parseDateParts = (rawDate) => {
+    if (!rawDate) {
+        const now = new Date();
+        return {
+            year: now.getFullYear(),
+            month: now.getMonth() + 1,
+            day: now.getDate()
+        };
     }
+    if (rawDate instanceof Date && !isNaN(rawDate.getTime())) {
+        return {
+            year: rawDate.getFullYear(),
+            month: rawDate.getMonth() + 1,
+            day: rawDate.getDate()
+        };
+    }
+    const s = String(rawDate).trim();
+    if (!s) {
+        const now = new Date();
+        return {
+            year: now.getFullYear(),
+            month: now.getMonth() + 1,
+            day: now.getDate()
+        };
+    }
+
+    // 1. Strict 8-digit YYYYMMDD
+    const ymd8 = s.match(/^(\d{4})(\d{2})(\d{2})$/);
+    if (ymd8) {
+        const y = parseInt(ymd8[1], 10);
+        const m = parseInt(ymd8[2], 10);
+        const d = parseInt(ymd8[3], 10);
+        if (m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+            return { year: y, month: m, day: d };
+        }
+    }
+
+    // 2. ISO or slashed YYYY-MM-DD or YYYY/MM/DD
+    const ymdSep = s.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})$/);
+    if (ymdSep) {
+        const y = parseInt(ymdSep[1], 10);
+        const m = parseInt(ymdSep[2], 10);
+        const d = parseInt(ymdSep[3], 10);
+        if (m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+            return { year: y, month: m, day: d };
+        }
+    }
+
+    // 3. Indian format DD-MM-YYYY or DD/MM/YYYY or DD-MM-YY or DD/MM/YY
+    const dmySep = s.match(/^(\d{1,2})[-\/](\d{1,2})[-\/](\d{2,4})$/);
+    if (dmySep) {
+        const d = parseInt(dmySep[1], 10);
+        const m = parseInt(dmySep[2], 10);
+        let y = parseInt(dmySep[3], 10);
+        if (y < 100) y += 2000;
+        if (m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+            return { year: y, month: m, day: d };
+        }
+    }
+
+    // 4. Named month: e.g. 10-Jan-2025, 10 Jan 2025, 10/Jan/2025
     const monthNames = {
-        jan: '01', feb: '02', mar: '03', apr: '04', may: '05', jun: '06',
-        jul: '07', aug: '08', sep: '09', oct: '10', nov: '11', dec: '12'
+        jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+        jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12
     };
     const namedMatch = s.match(/^(\d{1,2})[\s\-\/]([a-zA-Z]{3,9})[\s\-\/](\d{2,4})$/);
     if (namedMatch) {
-        const day = namedMatch[1].padStart(2, '0');
+        const d = parseInt(namedMatch[1], 10);
         const monKey = namedMatch[2].toLowerCase().substring(0, 3);
-        const month = monthNames[monKey];
-        let year = namedMatch[3];
-        if (year.length === 2) year = `20${year}`;
-        if (month) return `${year}-${month}-${day}`;
+        const m = monthNames[monKey];
+        let y = parseInt(namedMatch[3], 10);
+        if (y < 100) y += 2000;
+        if (m && d >= 1 && d <= 31) {
+            return { year: y, month: m, day: d };
+        }
     }
-    return s;
+
+    // 5. Native Date parse
+    const dt = new Date(s);
+    if (!isNaN(dt.getTime())) {
+        return {
+            year: dt.getFullYear(),
+            month: dt.getMonth() + 1,
+            day: dt.getDate()
+        };
+    }
+
+    // Safe fallback: current date so voucher date is never missing
+    const fallbackNow = new Date();
+    return {
+        year: fallbackNow.getFullYear(),
+        month: fallbackNow.getMonth() + 1,
+        day: fallbackNow.getDate()
+    };
 };
 
-// Task 1: Format ISO date strictly to Tally XML YYYYMMDD by stripping hyphens (NEVER new Date().getFullYear())
+// Utility: Strict Indian Date Parser (formats to ISO YYYY-MM-DD)
+export const parseIndianDateToISO = (rawDate) => {
+    if (!rawDate) return '';
+    const { year, month, day } = parseDateParts(rawDate);
+    const yStr = String(year).padStart(4, '0');
+    const mStr = String(month).padStart(2, '0');
+    const dStr = String(day).padStart(2, '0');
+    return `${yStr}-${mStr}-${dStr}`;
+};
+
+// Utility: Strict Tally XML Date Formatter
+// Formats any date strictly to 8 digits (YYYYMMDD) with no spaces or dashes.
+// Never overwrites, clamps, or mutates the user's selected date behind the scenes.
+export const formatTallyDate = (dateInput) => {
+    const { year, month, day } = parseDateParts(dateInput);
+    const yStr = String(year).padStart(4, '0');
+    const mStr = String(month).padStart(2, '0');
+    const dStr = String(day).padStart(2, '0');
+    return `${yStr}${mStr}${dStr}`;
+};
+
+// Backward compatibility helper
+export const useEduSafeDate = (dateInput) => {
+    return formatTallyDate(dateInput);
+};
+
 export const formatDateForTallyXML = (isoDateStr) => {
-    if (!isoDateStr) return '';
-    const iso = parseIndianDateToISO(isoDateStr);
-    if (/^\d{4}-\d{2}-\d{2}$/.test(iso)) return iso.replace(/-/g, '');
-    const clean = String(iso).replace(/[-\/\s]/g, '');
-    return clean;
+    return formatTallyDate(isoDateStr);
+};
+
+// Step 2A: Extract 10-character PAN from 15-digit GSTIN
+export const getPanFromGstin = (gstin) => {
+    if (!gstin || typeof gstin !== 'string') return '';
+    const clean = gstin.trim().toUpperCase();
+    if (clean.length === 15) {
+        return clean.slice(2, 12);
+    }
+    return '';
 };
 
 // Helper: Combine multiple Tally voucher XMLs into a single valid Tally XML document
-export const combineTallyXmlList = (xmlList) => {
+// Strictly enforces Master-First ordering: groups all <UNIT>, <LEDGER>, and <STOCKITEM> master messages
+// inside <REQUESTDATA> BEFORE the <VOUCHER> message block so Tally processes and commits masters first.
+export const combineTallyXmlList = (xmlList, options = {}) => {
     const validXmls = (xmlList || []).filter(Boolean);
     if (validXmls.length === 0) return '';
-    if (validXmls.length === 1) return validXmls[0];
 
-    const allMessages = [];
+    const unitMessages = [];
+    const ledgerMessages = [];
+    const stockItemMessages = [];
+    const voucherMessages = [];
+    const seenUnits = new Set();
+    const seenLedgers = new Set();
+    const seenStockItems = new Set();
+
     validXmls.forEach(xml => {
-        const matches = xml.match(/<TALLYMESSAGE[\s\S]*?<\/TALLYMESSAGE>/gi);
-        if (matches) {
-            allMessages.push(...matches);
-        }
+        const matches = xml.match(/<TALLYMESSAGE[\s\S]*?<\/TALLYMESSAGE>/gi) || [];
+        matches.forEach(m => {
+            const isUnit = /<UNIT[\s>]/i.test(m);
+            const isLedger = /<LEDGER[\s>]/i.test(m);
+            const isStock = /<STOCKITEM[\s>]/i.test(m);
+            const isVoucher = /<VOUCHER[\s>]/i.test(m);
+
+            if (isUnit) {
+                const name = (m.match(/<UNIT[^>]*NAME="([^"]+)"/i) || m.match(/<NAME>([^<]+)<\/NAME>/i) || [])[1] || m.trim();
+                if (!seenUnits.has(name)) {
+                    seenUnits.add(name);
+                    unitMessages.push(m.trim());
+                }
+            } else if (isLedger) {
+                const name = (m.match(/<LEDGER[^>]*NAME="([^"]+)"/i) || m.match(/<NAME>([^<]+)<\/NAME>/i) || [])[1] || m.trim();
+                if (!seenLedgers.has(name)) {
+                    seenLedgers.add(name);
+                    ledgerMessages.push(m.trim());
+                }
+            } else if (isStock) {
+                const name = (m.match(/<STOCKITEM[^>]*NAME="([^"]+)"/i) || m.match(/<NAME>([^<]+)<\/NAME>/i) || [])[1] || m.trim();
+                if (!seenStockItems.has(name)) {
+                    seenStockItems.add(name);
+                    stockItemMessages.push(m.trim());
+                }
+            } else if (isVoucher) {
+                voucherMessages.push(m.trim());
+            } else {
+                voucherMessages.push(m.trim());
+            }
+        });
     });
 
-    if (allMessages.length === 0) return validXmls.join('\n\n');
+    // Master-First Enforcement: All <UNIT>, <LEDGER>, <STOCKITEM> masters strictly before <VOUCHER>
+    const orderedMessages = [
+        ...unitMessages,
+        ...ledgerMessages,
+        ...stockItemMessages,
+        ...voucherMessages
+    ];
 
-    return `<?xml version="1.0" encoding="UTF-8"?>\n<ENVELOPE>\n  <HEADER>\n    <TALLYREQUEST>Import Data</TALLYREQUEST>\n  </HEADER>\n  <BODY>\n    <IMPORTDATA>\n      <REQUESTDESC>\n        <REPORTNAME>All Masters</REPORTNAME>\n      </REQUESTDESC>\n      <REQUESTDATA>\n${allMessages.map(m => '        ' + m.trim()).join('\n')}\n      </REQUESTDATA>\n    </IMPORTDATA>\n  </BODY>\n</ENVELOPE>`;
+    if (orderedMessages.length === 0) return validXmls.join('\n\n').replace(/&#4;\s*/g, '');
+
+    const finalEnvelope = `<?xml version="1.0" encoding="UTF-8"?>\n<ENVELOPE>\n  <HEADER>\n    <TALLYREQUEST>Import Data</TALLYREQUEST>\n  </HEADER>\n  <BODY>\n    <IMPORTDATA>\n      <REQUESTDESC>\n        <REPORTNAME>All Masters</REPORTNAME>\n      </REQUESTDESC>\n      <REQUESTDATA>\n${orderedMessages.map(m => '        ' + m).join('\n')}\n      </REQUESTDATA>\n    </IMPORTDATA>\n  </BODY>\n</ENVELOPE>`;
+    return finalEnvelope.replace(/&#4;\s*/g, '');
 };
 
 // Utility: Indian 2-Digit GSTIN State Code Lookup Map (Task 2)
@@ -113,66 +253,31 @@ export const getStateFromGstin = (gstin, fallback = '') => {
     return fallback || '';
 };
 
-// Utility: Dynamically compute Tally EDU / Current FY safe date (Task 1)
-// - Clamps into target Financial Year (April 1 of targetFY to March 31 of targetFY + 1).
-// - Preserves original month where possible.
-// - Snaps Day (DD) to nearest Tally EDU allowed day ('01' or '02').
-// ZERO HARDCODING.
-export const getTallyEduSafeDate = (isoDateStr, targetFYStartYear) => {
-    const currentYear = new Date().getFullYear();
-    const fyStartYear = Number(targetFYStartYear) || currentYear;
-    
-    const iso = parseIndianDateToISO(isoDateStr);
-    let origMonth = 4;
-    let origDay = 1;
-    
-    if (iso && /^\d{4}-\d{2}-\d{2}$/.test(iso)) {
-        const parts = iso.split('-').map(Number);
-        origMonth = parts[1];
-        origDay = parts[2];
-    }
-    
-    // Snaps Day to nearest Tally EDU allowed day ('01' or '02')
-    const allowedDays = [1, 2];
-    const snappedDay = allowedDays.reduce((prev, curr) => 
-        Math.abs(curr - origDay) < Math.abs(prev - origDay) ? curr : prev
-    );
-    const dayStr = String(snappedDay).padStart(2, '0');
-    
-    // Indian FY: April (04) to December (12) belong to fyStartYear.
-    // January (01) to March (03) belong to fyStartYear + 1.
-    const validMonth = (origMonth >= 1 && origMonth <= 12) ? origMonth : 4;
-    const yearForMonth = (validMonth >= 4) ? fyStartYear : (fyStartYear + 1);
-    const monthStr = String(validMonth).padStart(2, '0');
-    
-    return `${yearForMonth}-${monthStr}-${dayStr}`;
+// Utility: Format date helper
+export const getTallyEduSafeDate = (dateInput) => {
+    const { year, month, day } = parseDateParts(dateInput);
+    const yStr = String(year).padStart(4, '0');
+    const mStr = String(month).padStart(2, '0');
+    const dStr = String(day).padStart(2, '0');
+    return `${yStr}-${mStr}-${dStr}`;
 };
 
-// Helper: Dynamically adapt Tally XML dates for Tally EDU / Target FY mode (Task 1)
-export const applyEduModeToXml = (xmlString, targetFYStartYear) => {
-    if (!xmlString) return '';
-    const replaceDateTag = (tagName) => (match, y, m, d) => {
-        const safeIso = getTallyEduSafeDate(`${y}-${m}-${d}`, targetFYStartYear);
-        const safeFormatted = safeIso.replace(/-/g, '');
-        return `<${tagName}>${safeFormatted}</${tagName}>`;
-    };
-    return xmlString
-        .replace(/<DATE>(\d{4})(\d{2})(\d{2})<\/DATE>/g, replaceDateTag('DATE'))
-        .replace(/<EFFECTIVEDATE>(\d{4})(\d{2})(\d{2})<\/EFFECTIVEDATE>/g, replaceDateTag('EFFECTIVEDATE'));
+// Helper: Pass-through XML
+export const applyEduModeToXml = (xmlString) => {
+    return xmlString || '';
 };
 
 export const applySafeDateToXml = (xmlString, targetIsoDateOrFY) => {
     if (!xmlString) return '';
-    if (typeof targetIsoDateOrFY === 'number' || /^\d{4}$/.test(String(targetIsoDateOrFY || '').trim())) {
-        return applyEduModeToXml(xmlString, Number(targetIsoDateOrFY));
-    }
     if (typeof targetIsoDateOrFY === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(targetIsoDateOrFY.trim())) {
-        const formatted = formatDateForTallyXML(targetIsoDateOrFY);
+        const formatted = formatTallyDate(targetIsoDateOrFY);
         return xmlString
-            .replace(/<DATE>\d{8}<\/DATE>/g, `<DATE>${formatted}</DATE>`)
-            .replace(/<EFFECTIVEDATE>\d{8}<\/EFFECTIVEDATE>/g, `<EFFECTIVEDATE>${formatted}</EFFECTIVEDATE>`);
+            .replace(/<DATE>[\s\S]*?<\/DATE>/gi, `<DATE>${formatted}</DATE>`)
+            .replace(/<EFFECTIVEDATE>[\s\S]*?<\/EFFECTIVEDATE>/gi, `<EFFECTIVEDATE>${formatted}</EFFECTIVEDATE>`)
+            .replace(/<REFERENCEDATE>[\s\S]*?<\/REFERENCEDATE>/gi, `<REFERENCEDATE>${formatted}</REFERENCEDATE>`)
+            .replace(/&#4;\s*/g, '');
     }
-    return applyEduModeToXml(xmlString);
+    return xmlString.replace(/&#4;\s*/g, '');
 };
 
 function App() {
@@ -186,11 +291,6 @@ function App() {
     const [xmlModalData, setXmlModalData] = useState(null);
     const [showRawXml, setShowRawXml] = useState(false);
     const [showTallyImportGuide, setShowTallyImportGuide] = useState(false);
-    const [useEduDate, setUseEduDate] = useState(false);
-    const [targetFY, setTargetFY] = useState(() => {
-        const now = new Date();
-        return now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
-    });
     const [copyLabel, setCopyLabel] = useState('Copy XML');
     const [isSyncing, setIsSyncing] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
@@ -291,6 +391,21 @@ function App() {
             updated[parent] = { ...updated[parent], [child]: value };
         } else {
             updated[field] = value;
+        }
+
+        if (field === 'invoiceDate' || field === 'invoice_date' || field === 'date') {
+            updated.invoiceDate = value;
+            updated.invoice_date = value;
+            updated.date = value;
+
+            // Immediately synchronize date in voucher XML tags so any downstream XML export matches
+            if (updated.tallyXml && value) {
+                const formatted = formatTallyDate(value);
+                updated.tallyXml = updated.tallyXml
+                    .replace(/<DATE>[\s\S]*?<\/DATE>/gi, `<DATE>${formatted}</DATE>`)
+                    .replace(/<EFFECTIVEDATE>[\s\S]*?<\/EFFECTIVEDATE>/gi, `<EFFECTIVEDATE>${formatted}</EFFECTIVEDATE>`)
+                    .replace(/<REFERENCEDATE>[\s\S]*?<\/REFERENCEDATE>/gi, `<REFERENCEDATE>${formatted}</REFERENCEDATE>`);
+            }
         }
 
         setActiveReviewInvoice(updated);
@@ -494,12 +609,27 @@ function App() {
     const needsReviewCount = useMemo(() => invoices.filter(i => i.verificationState === 'needs_review' || i.verificationState === 'math_error').length, [invoices]);
     const extractingCount = useMemo(() => invoices.filter(i => i.verificationState === 'extracting').length, [invoices]);
 
-    // HSN / GSTIN Validation Rate
+    // HSN Validation Rate: checks item.hsn_code || item.hsn || item.hsnCode across all line_items in the invoices
     const hsnValidationRate = useMemo(() => {
-        const totalProcessed = totalInvoicesCount - extractingCount;
-        if (totalProcessed <= 0) return 0;
-        return Math.round((verifiedCount / totalProcessed) * 100);
-    }, [totalInvoicesCount, extractingCount, verifiedCount]);
+        const hsnRegex = /^\d{4,8}$/;
+        let totalItems = 0;
+        let validHsnItems = 0;
+
+        invoices.forEach(inv => {
+            if (inv.verificationState === 'extracting') return;
+            const items = inv.line_items || inv.items || [];
+            items.forEach(item => {
+                totalItems++;
+                const hsn = String(item.hsn_code || item.hsn || item.hsnCode || item.hsn_sac || '').trim();
+                if (hsnRegex.test(hsn)) {
+                    validHsnItems++;
+                }
+            });
+        });
+
+        if (totalItems === 0) return 0;
+        return Math.round((validHsnItems / totalItems) * 100);
+    }, [invoices]);
 
     // Total Tax Detected (sum of cgst + sgst + igst)
     const totalTaxDetected = useMemo(() => {
@@ -588,7 +718,7 @@ function App() {
     // Copy & Download XML Modal
     const handleCopyXml = () => {
         if (!xmlModalData?.xml) return;
-        const finalXml = useEduDate ? applyEduModeToXml(xmlModalData.xml, targetFY) : xmlModalData.xml;
+        const finalXml = xmlModalData.xml;
         navigator.clipboard.writeText(finalXml).then(() => {
             setCopyLabel('Copied!');
             setTimeout(() => setCopyLabel('Copy XML'), 2000);
@@ -597,7 +727,7 @@ function App() {
 
     const handleDownloadXml = () => {
         if (!xmlModalData?.xml) return;
-        const finalXml = useEduDate ? applyEduModeToXml(xmlModalData.xml, targetFY) : xmlModalData.xml;
+        const finalXml = xmlModalData.xml;
         const blob = new Blob([finalXml], { type: 'application/xml' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -681,19 +811,30 @@ function App() {
         setIsSaving(true);
         try {
             const token = await getToken();
+            const dateVal = activeReviewInvoice.invoiceDate || activeReviewInvoice.invoice_date || activeReviewInvoice.date || '';
+            const payload = {
+                ...activeReviewInvoice,
+                invoiceDate: dateVal,
+                invoice_date: dateVal,
+                date: dateVal
+            };
             const response = await fetch(`http://localhost:5000/api/invoices/${activeReviewInvoice.id}`, {
                 method: 'PUT',
                 headers: {
                     'Authorization': `Bearer ${token}`,
                     'Content-Type': 'application/json'
                 },
-                body: JSON.stringify(activeReviewInvoice)
+                body: JSON.stringify(payload)
             });
             const result = await response.json();
             if (result.success && result.data) {
                 // Update both the review panel and the workbench list with fresh XML
-                setActiveReviewInvoice(result.data);
-                setInvoices(prev => prev.map(inv => inv.id === result.data.id ? result.data : inv));
+                const updatedData = {
+                    ...result.data,
+                    invoiceDate: parseIndianDateToISO(result.data.invoiceDate || result.data.invoice_date || result.data.date || '')
+                };
+                setActiveReviewInvoice(updatedData);
+                setInvoices(prev => prev.map(inv => inv.id === updatedData.id ? updatedData : inv));
                 setToast({ message: 'Changes saved — Tally XML regenerated successfully!', type: 'success' });
             } else {
                 setToast({ message: result.error || 'Failed to save changes.', type: 'error' });
@@ -703,6 +844,62 @@ function App() {
             setToast({ message: 'Network error — could not save changes.', type: 'error' });
         } finally {
             setIsSaving(false);
+        }
+    };
+
+    // Approve & Next Invoice — save changes/verification to DB, sync XML, and advance queue
+    const handleApproveAndNext = async () => {
+        if (!activeReviewInvoice) return;
+
+        const dateVal = activeReviewInvoice.invoiceDate || activeReviewInvoice.invoice_date || activeReviewInvoice.date || '';
+        const approvedInvoice = {
+            ...activeReviewInvoice,
+            invoiceDate: dateVal,
+            invoice_date: dateVal,
+            date: dateVal,
+            verificationState: 'verified'
+        };
+
+        if (approvedInvoice.tallyXml && dateVal) {
+            const formatted = formatTallyDate(dateVal);
+            approvedInvoice.tallyXml = approvedInvoice.tallyXml
+                .replace(/<DATE>[\s\S]*?<\/DATE>/gi, `<DATE>${formatted}</DATE>`)
+                .replace(/<EFFECTIVEDATE>[\s\S]*?<\/EFFECTIVEDATE>/gi, `<EFFECTIVEDATE>${formatted}</EFFECTIVEDATE>`)
+                .replace(/<REFERENCEDATE>[\s\S]*?<\/REFERENCEDATE>/gi, `<REFERENCEDATE>${formatted}</REFERENCEDATE>`);
+        }
+
+        // Immediately update the main parent invoices state
+        setInvoices(prev => prev.map(inv => inv.id === approvedInvoice.id ? approvedInvoice : inv));
+
+        // Advance to next invoice in queue needing review
+        const remaining = invoices.filter(i => i.id !== approvedInvoice.id && i.verificationState !== 'verified');
+        if (remaining.length > 0) {
+            setActiveReviewInvoice(remaining[0]);
+        } else {
+            setActiveReviewInvoice(null);
+        }
+
+        // Persist to DB and regenerate XML server-side asynchronously
+        try {
+            const token = await getToken();
+            const response = await fetch(`http://localhost:5000/api/invoices/${approvedInvoice.id}`, {
+                method: 'PUT',
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(approvedInvoice)
+            });
+            const result = await response.json();
+            if (result.success && result.data) {
+                const updatedData = {
+                    ...result.data,
+                    invoiceDate: parseIndianDateToISO(result.data.invoiceDate || result.data.invoice_date || result.data.date || '')
+                };
+                setInvoices(prev => prev.map(inv => inv.id === updatedData.id ? updatedData : inv));
+            }
+        } catch (err) {
+            console.error('Approve and next persist error:', err);
         }
     };
 
@@ -1149,7 +1346,12 @@ function App() {
 
                                                 <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-200/70">
                                                     <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider block mb-0.5">Invoice Date</span>
-                                                    <input type="date" className="w-full bg-white border border-slate-200 rounded px-2 py-1 text-[13px] font-mono font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500" value={parseIndianDateToISO(activeReviewInvoice?.invoiceDate) || ''} onChange={(e) => handleInvoiceChange('invoiceDate', e.target.value)} />
+                                                    <input
+                                                        type="date"
+                                                        className="w-full bg-white border border-slate-200 rounded px-2 py-1 text-[13px] font-mono font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                                                        value={parseIndianDateToISO(activeReviewInvoice?.invoiceDate || activeReviewInvoice?.invoice_date || activeReviewInvoice?.date) || ''}
+                                                        onChange={(e) => handleInvoiceChange('invoiceDate', e.target.value)}
+                                                    />
                                                 </div>
 
                                                 <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-200/70">
@@ -1482,18 +1684,8 @@ function App() {
                                                 </button>
                                                 <button
                                                     type="button"
-                                                    onClick={() => {
-                                                        // Mark current invoice as verified
-                                                        setInvoices(prev => prev.map(inv => inv.id === activeReviewInvoice.id ? { ...inv, verificationState: 'verified' } : inv));
-                                                        // Find next invoice in queue needing review
-                                                        const remaining = invoices.filter(i => i.id !== activeReviewInvoice.id && i.verificationState !== 'verified');
-                                                        if (remaining.length > 0) {
-                                                            setActiveReviewInvoice(remaining[0]);
-                                                        } else {
-                                                            setActiveReviewInvoice(null);
-                                                        }
-                                                    }}
-                                                    className="px-5 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs transition-colors"
+                                                    onClick={handleApproveAndNext}
+                                                    className="px-5 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs transition-colors cursor-pointer"
                                                 >
                                                     <span className="material-symbols-outlined text-[16px]">check_circle</span>
                                                     <span>Approve & Next Invoice</span>
@@ -1984,7 +2176,19 @@ function App() {
                                         disabled={selectedInvoices.length === 0}
                                         onClick={() => {
                                             if (selectedInvoices.length === 0) return;
-                                            const combinedXml = combineTallyXmlList(selectedInvoices.map(i => i.tallyXml));
+                                            const xmls = selectedInvoices.map(i => {
+                                                let xml = i.tallyXml || '';
+                                                const curDate = i.invoiceDate || i.invoice_date || i.date;
+                                                if (xml && curDate) {
+                                                    const formatted = formatTallyDate(curDate);
+                                                    xml = xml
+                                                        .replace(/<DATE>[\s\S]*?<\/DATE>/gi, `<DATE>${formatted}</DATE>`)
+                                                        .replace(/<EFFECTIVEDATE>[\s\S]*?<\/EFFECTIVEDATE>/gi, `<EFFECTIVEDATE>${formatted}</EFFECTIVEDATE>`)
+                                                        .replace(/<REFERENCEDATE>[\s\S]*?<\/REFERENCEDATE>/gi, `<REFERENCEDATE>${formatted}</REFERENCEDATE>`);
+                                                }
+                                                return xml;
+                                            });
+                                            const combinedXml = combineTallyXmlList(xmls);
                                             setXmlModalData({ vendor: `Batch (${selectedInvoices.length} invoices)`, invNo: 'BATCH', xml: combinedXml });
                                         }}
                                         className={`h-8 px-3.5 rounded-lg text-xs font-medium inline-flex items-center gap-1.5 shadow-xs transition-all ${selectedInvoices.length > 0 ? 'bg-slate-900 text-white hover:bg-slate-800 cursor-pointer' : 'bg-slate-100 text-slate-400 cursor-not-allowed opacity-60'}`}
@@ -1999,10 +2203,19 @@ function App() {
                                         onClick={() => {
                                             if (selectedInvoices.length === 0) return;
                                             // Task 5: Download the batch XML file and show import guide
-                                            let combinedXml = combineTallyXmlList(selectedInvoices.map(i => i.tallyXml));
-                                            if (useEduDate) {
-                                                combinedXml = applyEduModeToXml(combinedXml, targetFY);
-                                            }
+                                            const xmls = selectedInvoices.map(i => {
+                                                let xml = i.tallyXml || '';
+                                                const curDate = i.invoiceDate || i.invoice_date || i.date;
+                                                if (xml && curDate) {
+                                                    const formatted = formatTallyDate(curDate);
+                                                    xml = xml
+                                                        .replace(/<DATE>[\s\S]*?<\/DATE>/gi, `<DATE>${formatted}</DATE>`)
+                                                        .replace(/<EFFECTIVEDATE>[\s\S]*?<\/EFFECTIVEDATE>/gi, `<EFFECTIVEDATE>${formatted}</EFFECTIVEDATE>`)
+                                                        .replace(/<REFERENCEDATE>[\s\S]*?<\/REFERENCEDATE>/gi, `<REFERENCEDATE>${formatted}</REFERENCEDATE>`);
+                                                }
+                                                return xml;
+                                            });
+                                            const combinedXml = combineTallyXmlList(xmls);
                                             const blob = new Blob([combinedXml], { type: 'application/xml' });
                                             const url = URL.createObjectURL(blob);
                                             const a = document.createElement('a');
@@ -2097,51 +2310,11 @@ function App() {
                                     </div>
                                 )}
 
-                                {/* Dynamic Tally EDU / Current FY Compatibility Mode Toggle */}
-                                <div className="bg-amber-50/70 border border-amber-200/80 rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs">
-                                    <div className="flex items-center gap-2.5">
-                                        <span className="material-symbols-outlined text-amber-600 text-[18px] shrink-0">school</span>
-                                        <div>
-                                            <div className="font-semibold text-slate-900">Tally EDU / Current FY Compatibility Mode</div>
-                                            <div className="text-[11px] text-slate-500">
-                                                {useEduDate
-                                                    ? `Clamping dates to FY ${targetFY}-${String(targetFY + 1).slice(-2)} (Apr 1–Mar 31) & snapping day to 01/02 for Tally EDU`
-                                                    : 'Outputting exact extracted invoice dates (zero modification)'}
-                                            </div>
-                                        </div>
-                                    </div>
-                                    <div className="flex items-center gap-3 shrink-0">
-                                        <label className="flex items-center gap-1.5 cursor-pointer font-medium text-slate-700">
-                                            <input
-                                                type="checkbox"
-                                                checked={useEduDate}
-                                                onChange={(e) => setUseEduDate(e.target.checked)}
-                                                className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 h-4 w-4 cursor-pointer"
-                                            />
-                                            <span className="text-[11px] font-semibold">Enable Safe FY Mode</span>
-                                        </label>
-                                        {useEduDate && (
-                                            <div className="flex items-center gap-1.5 bg-white border border-amber-300 rounded-lg px-2.5 py-1 shadow-2xs">
-                                                <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Target FY Start:</span>
-                                                <input
-                                                    type="number"
-                                                    min="2000"
-                                                    max="2099"
-                                                    className="w-14 text-xs font-mono font-bold text-slate-800 focus:outline-none"
-                                                    value={targetFY}
-                                                    onChange={(e) => setTargetFY(Number(e.target.value) || new Date().getFullYear())}
-                                                />
-                                                <span className="text-[11px] font-mono text-amber-700 font-semibold">(FY {targetFY}-{String(targetFY + 1).slice(-2)})</span>
-                                            </div>
-                                        )}
-                                    </div>
-                                </div>
-
                                 {/* Raw XML Toggle */}
                                 {showRawXml && (
                                     <div className="flex-1 overflow-y-auto bg-slate-950 rounded-xl p-4 border border-slate-800">
                                         <pre className="xml-code text-sky-300 font-mono text-[11px] leading-relaxed whitespace-pre-wrap break-all">
-                                            {useEduDate ? applyEduModeToXml(xmlModalData.xml, targetFY) : xmlModalData.xml}
+                                            {xmlModalData.xml}
                                         </pre>
                                     </div>
                                 )}
@@ -2170,7 +2343,7 @@ function App() {
                                             onClick={() => {
                                                 // Task 5: Download batch XML + show import guide
                                                 if (!xmlModalData?.xml) return;
-                                                const finalXml = useEduDate ? applyEduModeToXml(xmlModalData.xml, targetFY) : xmlModalData.xml;
+                                                const finalXml = xmlModalData.xml;
                                                 const blob = new Blob([finalXml], { type: 'application/xml' });
                                                 const url = URL.createObjectURL(blob);
                                                 const a = document.createElement('a');

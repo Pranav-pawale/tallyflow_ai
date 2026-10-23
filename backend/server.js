@@ -166,47 +166,137 @@ function validateGstin(gstin) {
     return regex.test(gstin.trim().toUpperCase());
 }
 
-// Utility: Indian Date Parsing Helper (Task 1)
-// Strict date parser: parses DD-MM-YY, DD/MM/YY, DD-MM-YYYY, DD/MM/YYYY
-// First segment is ALWAYS Day (DD), second is Month (MM), 2-digit YY maps to 20YY
-function parseIndianDateToISO(rawDate) {
-    if (!rawDate) return '';
-    const s = String(rawDate).trim();
-    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-    const isoSlash = s.match(/^(\d{4})[\/](\d{1,2})[\/](\d{1,2})$/);
-    if (isoSlash) return `${isoSlash[1]}-${isoSlash[2].padStart(2, '0')}-${isoSlash[3].padStart(2, '0')}`;
-    const m = s.match(/^(\d{1,2})[\-\/](\d{1,2})[\-\/](\d{2,4})$/);
-    if (m) {
-        const day = m[1].padStart(2, '0');
-        const month = m[2].padStart(2, '0');
-        let year = m[3];
-        if (year.length === 2) year = `20${year}`;
-        return `${year}-${month}-${day}`;
+// Utility: Round to 2 decimal places with epsilon to prevent floating-point inaccuracies
+function round2(val) {
+    return Math.round((Number(val || 0) + Number.EPSILON) * 100) / 100;
+}
+
+// Utility: Comprehensive Date Parser that parses ISO, Indian (DD-MM-YYYY), slash, and 8-digit formats
+function parseDateParts(rawDate) {
+    if (!rawDate) {
+        const now = new Date();
+        return {
+            year: now.getFullYear(),
+            month: now.getMonth() + 1,
+            day: now.getDate()
+        };
     }
+    if (rawDate instanceof Date && !isNaN(rawDate.getTime())) {
+        return {
+            year: rawDate.getFullYear(),
+            month: rawDate.getMonth() + 1,
+            day: rawDate.getDate()
+        };
+    }
+    const s = String(rawDate).trim();
+    if (!s) {
+        const now = new Date();
+        return {
+            year: now.getFullYear(),
+            month: now.getMonth() + 1,
+            day: now.getDate()
+        };
+    }
+
+    // 1. Strict 8-digit YYYYMMDD
+    const ymd8 = s.match(/^(\d{4})(\d{2})(\d{2})$/);
+    if (ymd8) {
+        const y = parseInt(ymd8[1], 10);
+        const m = parseInt(ymd8[2], 10);
+        const d = parseInt(ymd8[3], 10);
+        if (m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+            return { year: y, month: m, day: d };
+        }
+    }
+
+    // 2. ISO or slashed YYYY-MM-DD or YYYY/MM/DD
+    const ymdSep = s.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})$/);
+    if (ymdSep) {
+        const y = parseInt(ymdSep[1], 10);
+        const m = parseInt(ymdSep[2], 10);
+        const d = parseInt(ymdSep[3], 10);
+        if (m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+            return { year: y, month: m, day: d };
+        }
+    }
+
+    // 3. Indian format DD-MM-YYYY or DD/MM/YYYY or DD-MM-YY or DD/MM/YY
+    const dmySep = s.match(/^(\d{1,2})[-\/](\d{1,2})[-\/](\d{2,4})$/);
+    if (dmySep) {
+        const d = parseInt(dmySep[1], 10);
+        const m = parseInt(dmySep[2], 10);
+        let y = parseInt(dmySep[3], 10);
+        if (y < 100) y += 2000;
+        if (m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+            return { year: y, month: m, day: d };
+        }
+    }
+
+    // 4. Named month: e.g. 10-Jan-2025, 10 Jan 2025, 10/Jan/2025
     const monthNames = {
-        jan: '01', feb: '02', mar: '03', apr: '04', may: '05', jun: '06',
-        jul: '07', aug: '08', sep: '09', oct: '10', nov: '11', dec: '12'
+        jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+        jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12
     };
     const namedMatch = s.match(/^(\d{1,2})[\s\-\/]([a-zA-Z]{3,9})[\s\-\/](\d{2,4})$/);
     if (namedMatch) {
-        const day = namedMatch[1].padStart(2, '0');
+        const d = parseInt(namedMatch[1], 10);
         const monKey = namedMatch[2].toLowerCase().substring(0, 3);
-        const month = monthNames[monKey];
-        let year = namedMatch[3];
-        if (year.length === 2) year = `20${year}`;
-        if (month) return `${year}-${month}-${day}`;
+        const m = monthNames[monKey];
+        let y = parseInt(namedMatch[3], 10);
+        if (y < 100) y += 2000;
+        if (m && d >= 1 && d <= 31) {
+            return { year: y, month: m, day: d };
+        }
     }
-    return s;
+
+    // 5. Native Date parse
+    const dt = new Date(s);
+    if (!isNaN(dt.getTime())) {
+        return {
+            year: dt.getFullYear(),
+            month: dt.getMonth() + 1,
+            day: dt.getDate()
+        };
+    }
+
+    // Safe fallback: current date so voucher date is never missing
+    const fallbackNow = new Date();
+    return {
+        year: fallbackNow.getFullYear(),
+        month: fallbackNow.getMonth() + 1,
+        day: fallbackNow.getDate()
+    };
 }
 
-// Utility: Strict Tally XML Date Formatter (Task 1)
-// Format strictly by stripping hyphens from ISO date (YYYY-MM-DD -> YYYYMMDD), NEVER using new Date().getFullYear()
+// Utility: Indian Date Parsing Helper (formats to ISO YYYY-MM-DD)
+function parseIndianDateToISO(rawDate) {
+    if (!rawDate) return '';
+    const { year, month, day } = parseDateParts(rawDate);
+    const yStr = String(year).padStart(4, '0');
+    const mStr = String(month).padStart(2, '0');
+    const dStr = String(day).padStart(2, '0');
+    return `${yStr}-${mStr}-${dStr}`;
+}
+
+// Utility: Strict Tally XML Date Formatter
+// Formats any date strictly to 8 digits (YYYYMMDD) with no spaces or dashes.
+// Never overwrites, clamps, or mutates the user's selected date behind the scenes.
+function formatTallyDate(dateInput) {
+    const { year, month, day } = parseDateParts(dateInput);
+    const yStr = String(year).padStart(4, '0');
+    const mStr = String(month).padStart(2, '0');
+    const dStr = String(day).padStart(2, '0');
+    return `${yStr}${mStr}${dStr}`;
+}
+
+// Backward compatibility helper
+function useEduSafeDate(dateInput) {
+    return formatTallyDate(dateInput);
+}
+
+// Backward compatibility alias
 function formatDateForTallyXML(isoDateStr) {
-    if (!isoDateStr) return '';
-    const iso = parseIndianDateToISO(isoDateStr);
-    if (/^\d{4}-\d{2}-\d{2}$/.test(iso)) return iso.replace(/-/g, '');
-    const clean = String(iso).replace(/[-\/\s]/g, '');
-    return clean;
+    return formatTallyDate(isoDateStr);
 }
 
 // Utility: Indian 2-Digit GSTIN State Code Lookup Map (Task 2)
@@ -262,177 +352,244 @@ function getStateFromGstin(gstin, fallback = '') {
     return fallback || '';
 }
 
-// Utility: Dynamically compute Tally EDU / Current FY safe date (Task 1)
-// - Clamps into target Financial Year (April 1 of targetFY to March 31 of targetFY + 1).
-// - Preserves original month where possible.
-// - Snaps Day (DD) to nearest Tally EDU allowed day ('01' or '02').
-// ZERO HARDCODING.
-function getTallyEduSafeDate(isoDateStr, targetFYStartYear) {
-    const currentYear = new Date().getFullYear();
-    const fyStartYear = Number(targetFYStartYear) || currentYear;
-    
-    const iso = parseIndianDateToISO(isoDateStr);
-    let origMonth = 4;
-    let origDay = 1;
-    
-    if (iso && /^\d{4}-\d{2}-\d{2}$/.test(iso)) {
-        const parts = iso.split('-').map(Number);
-        origMonth = parts[1];
-        origDay = parts[2];
+// Utility: Extract 10-character PAN from 15-digit GSTIN (Task 2 Step 2A)
+function getPanFromGstin(gstin) {
+    if (!gstin || typeof gstin !== 'string') return '';
+    const clean = gstin.trim().toUpperCase();
+    if (clean.length === 15) {
+        return clean.slice(2, 12);
     }
-    
-    // Snaps Day to nearest Tally EDU allowed day ('01' or '02')
-    const allowedDays = [1, 2];
-    const snappedDay = allowedDays.reduce((prev, curr) => 
-        Math.abs(curr - origDay) < Math.abs(prev - origDay) ? curr : prev
-    );
-    const dayStr = String(snappedDay).padStart(2, '0');
-    
-    // Indian FY: April (04) to December (12) belong to fyStartYear.
-    // January (01) to March (03) belong to fyStartYear + 1.
-    const validMonth = (origMonth >= 1 && origMonth <= 12) ? origMonth : 4;
-    const yearForMonth = (validMonth >= 4) ? fyStartYear : (fyStartYear + 1);
-    const monthStr = String(validMonth).padStart(2, '0');
-    
-    return `${yearForMonth}-${monthStr}-${dayStr}`;
+    return '';
 }
 
-// Utility: Generate TallyPrime Purchase Voucher XML — Bulletproof Zero-Error Import (Tasks 1-5)
+// Utility: Date formatter helper
+function getTallyEduSafeDate(dateInput) {
+    const { year, month, day } = parseDateParts(dateInput);
+    const yStr = String(year).padStart(4, '0');
+    const mStr = String(month).padStart(2, '0');
+    const dStr = String(day).padStart(2, '0');
+    return `${yStr}-${mStr}-${dStr}`;
+}
+
+// Utility: Generate TallyPrime Purchase Voucher XML — Invoice Voucher View with Full Item Table (Task 2)
 function generateTallyXml(data, options = {}) {
-    const {
-        invoice_number = 'INV-001',
-        invoice_date = '',
-        vendor_name = 'Vendor Ledger',
-        gstin = '',
-        supplier_address = '',
-        supplier_state = '',
-        place_of_supply = '',
-        buyer_name = '',
-        buyer_gstin = '',
-        buyer_order_no = '',
-        supplier_ref = '',
-        vehicle_no = '',
-        vehicle_number = '',
-        payment_mode = '',
-        reverse_charge = 'NO',
-        taxable_amount = 0,
-        cgst_amount = 0,
-        sgst_amount = 0,
-        igst_amount = 0,
-        roundoff_amount = 0,
-        grand_total = 0,
-        purchase_ledger = 'Purchase Account',
-        cgst_ledger = 'Input CGST',
-        sgst_ledger = 'Input SGST',
-        igst_ledger = 'Input IGST',
-        roundoff_ledger = 'Round Off',
-        narration = '',
-        items = []
-    } = data;
+    const rawInvoices = Array.isArray(data) ? data : [data];
+    if (rawInvoices.length === 0) return '';
 
-    // Task 1: Dynamic Date Handling (Exact by default, Safe EDU mode when toggled)
-    const isoDate = parseIndianDateToISO(invoice_date);
-    let tallyDate = formatDateForTallyXML(isoDate || invoice_date);
-    if (options.safeEduMode || options.useEduDate || data.useEduDate || data.safeEduMode) {
-        const targetFY = options.targetFY || options.targetFYStartYear || data.targetFY || new Date().getFullYear();
-        const safeIso = getTallyEduSafeDate(isoDate || invoice_date, targetFY);
-        tallyDate = formatDateForTallyXML(safeIso);
-    }
+    // 1. Normalize all invoice records
+    const normalizedInvoices = rawInvoices.map((inv, idx) => {
+        const d = inv || {};
+        const invoiceNumber = (d.invoice_number || d.invoiceNumber || `INV-${idx + 1}`).trim();
+        // Priority: read exact updated date property from the invoice object
+        const rawDate = d.invoiceDate || d.invoice_date || d.date || '';
+        const isoDate = parseIndianDateToISO(rawDate);
+        const tallyDate = formatTallyDate(rawDate);
+        const rawRefDate = d.referenceDate || d.reference_date || d.orderDate || d.order_date || rawDate;
+        const tallyRefDate = formatTallyDate(rawRefDate);
+        const tallyTime = (d.voucher_time || d.voucherTime || d.time || '').trim();
 
-    const invNo = (invoice_number || 'INV-001').trim();
-    const cleanVendor = (vendor_name || 'Vendor Ledger').trim();
-    const vendorGstin = (gstin || '').trim().toUpperCase();
-    const buyerName = (buyer_name || '').trim();
-    const buyerGstin = (buyer_gstin || '').trim().toUpperCase();
-    const buyerOrderNo = (buyer_order_no || '').trim();
-    const vehicleNoVal = (vehicle_no || vehicle_number || '').trim();
-    const isRcm = String(reverse_charge).trim().toUpperCase() === 'YES';
+        const vendorGstin = (d.vendor_gstin || d.supplier_gstin || d.gstin || '').trim().toUpperCase();
+        const fallbackState = d.vendor_state || d.supplier_state || d.place_of_supply || d.placeOfSupply || 'Delhi';
+        const vendorState = getStateFromGstin(vendorGstin, fallbackState) || fallbackState || 'Delhi';
+        const vendorName = (d.vendor_name || d.supplier_name || d.vendorName || 'Vendor Ledger').trim();
+        const vendorAddress = (d.vendor_address || d.supplier_address || d.supplierAddress || '').trim();
 
-    // Task 2: Dynamic State derivation from 15-digit GSTIN (falling back to placeOfSupply or Delhi only if absent)
-    const derivedState = getStateFromGstin(vendorGstin, place_of_supply || supplier_state || 'Delhi');
-    const stateName = derivedState || 'Delhi';
-
-    // Task 3: Group line items by gst_rate for Purchase Ledgers
-    const slabGroups = {};
-    if (items && items.length > 0) {
-        items.forEach(it => {
-            let rate = it.gst_rate ?? it.gstRate ?? it.tax_rate ?? it.taxRate;
-            if (rate == null && (it.cgst_rate != null || it.cgstRate != null) && (it.sgst_rate != null || it.sgstRate != null)) {
-                rate = Number(it.cgst_rate ?? it.cgstRate) + Number(it.sgst_rate ?? it.sgstRate);
+        // Fix 3: Strict 6-Digit Pincode Only
+        const rawPin = (d.vendor_pincode || d.pincode || '').toString().trim();
+        let pincode = '';
+        if (/^\d{6}$/.test(rawPin)) {
+            pincode = rawPin;
+        } else {
+            const addressMatch = vendorAddress.match(/\b\d{6}\b/);
+            if (addressMatch) {
+                pincode = addressMatch[0];
             }
-            if (rate == null && (it.taxable_value || it.taxableValue)) {
-                const tv = Number(it.taxable_value || it.taxableValue || 0);
-                const tax = Number(it.gst_amount || 0) || (Number(it.cgst_amount || 0) + Number(it.sgst_amount || 0) + Number(it.igst_amount || 0));
-                if (tv > 0 && tax > 0) {
-                    rate = Math.round((tax / tv) * 100);
+        }
+        const panNumber = getPanFromGstin(vendorGstin);
+        const vendorPhone = (d.vendor_phone || d.phone || '').trim();
+        const bankName = (d.bank_name || d.bankName || '').trim();
+        const accountNumber = (d.account_number || d.accountNumber || '').trim();
+        const ifscCode = (d.ifsc_code || d.ifscCode || '').trim();
+        const upiId = (d.upi_id || d.upiId || '').trim();
+
+        const buyerName = (d.buyer_name || d.buyerName || '').trim();
+        const buyerGstin = (d.buyer_gstin || d.buyerGstin || '').trim().toUpperCase();
+        const buyerState = (d.buyer_state || d.buyerState || '').trim();
+        const buyerAddress = (d.buyer_address || d.buyerAddress || '').trim();
+
+        const buyerOrderNo = (d.buyer_order_no || d.buyerOrderNo || '').trim();
+        const orderDate = d.order_date || d.orderDate || '';
+        const dueDate = d.due_date || d.dueDate || '';
+        const paymentMode = (d.payment_mode || d.paymentMode || '').trim();
+        const reverseCharge = (d.reverse_charge || d.reverseCharge || 'No').trim();
+        const supplierRef = (d.supplier_ref || d.supplierRef || '').trim();
+        const vehicleNo = (d.vehicle_no || d.vehicleNumber || d.vehicle_number || '').trim();
+        const ewayBillNo = (d.eway_bill_no || d.ewayBillNo || '').trim();
+
+        const rawItems = d.line_items || d.items || [];
+        let lineItems = [];
+        if (Array.isArray(rawItems) && rawItems.length > 0) {
+            lineItems = rawItems.map(item => {
+                const desc = (item.description || item.itemName || item.name || 'Item').trim();
+                const hsn = String(item.hsn_code ?? item.hsn_sac ?? item.hsn ?? '').trim();
+                const qty = Number(item.quantity ?? item.qty ?? 1);
+                const uom = String(item.uom || item.unit || 'Nos').trim() || 'Nos';
+                let rate = Number(item.rate ?? 0);
+                const disc = Number(item.discount_percent ?? item.discount ?? 0);
+                let tv = Number(item.taxable_value ?? item.taxableValue ?? 0);
+                if (tv <= 0 && qty > 0 && rate > 0) {
+                    tv = Math.round(qty * rate * (1 - disc / 100) * 100) / 100;
                 }
-            }
-            const itemTaxable = parseFloat(it.taxable_value ?? it.taxableValue ?? (Number(it.quantity || 1) * Number(it.rate || 0)) ?? 0);
-            if (itemTaxable > 0) {
-                const key = (rate != null && rate !== '') ? `${Number(rate)}%` : 'Standard';
-                const lName = key === 'Standard' ? 'Purchase Account' : `Purchase @ ${key}`;
-                slabGroups[lName] = (slabGroups[lName] || 0) + itemTaxable;
-            }
-        });
-    }
+                if (rate <= 0 && tv > 0 && qty > 0) {
+                    rate = Math.round((tv / qty) * 100) / 100;
+                }
 
-    const purchaseLedgerEntries = [];
-    const slabLedgerNames = Object.keys(slabGroups);
-    if (slabLedgerNames.length > 0) {
-        slabLedgerNames.forEach(lName => {
-            purchaseLedgerEntries.push({
-                name: lName,
-                amount: Math.round(slabGroups[lName] * 100) / 100
+                let gstRate = item.gst_rate ?? item.gstRate ?? item.tax_rate ?? item.taxRate;
+                if (gstRate == null && (item.cgst_rate != null && item.sgst_rate != null)) {
+                    gstRate = Number(item.cgst_rate) + Number(item.sgst_rate);
+                }
+                if (gstRate == null && (item.cgst_amount || item.sgst_amount || item.igst_amount) && tv > 0) {
+                    const itemTax = Number(item.cgst_amount || 0) + Number(item.sgst_amount || 0) + Number(item.igst_amount || 0);
+                    gstRate = Math.round((itemTax / tv) * 100);
+                }
+                if (gstRate == null) gstRate = 18;
+
+                const cgstAmt = Number(item.cgst_amount ?? 0);
+                const sgstAmt = Number(item.sgst_amount ?? 0);
+                const igstAmt = Number(item.igst_amount ?? 0);
+                const totAmt = Number(item.total_amount ?? item.total ?? (tv + cgstAmt + sgstAmt + igstAmt));
+
+                return {
+                    description: desc,
+                    hsn_code: hsn,
+                    quantity: qty,
+                    uom,
+                    rate,
+                    discount_percent: disc,
+                    taxable_value: tv,
+                    gst_rate: Number(gstRate),
+                    cgst_amount: cgstAmt,
+                    sgst_amount: sgstAmt,
+                    igst_amount: igstAmt,
+                    total_amount: totAmt
+                };
             });
-        });
-    } else if (taxable_amount > 0) {
-        purchaseLedgerEntries.push({
-            name: 'Purchase Account',
-            amount: Math.round(Number(taxable_amount) * 100) / 100
-        });
-    }
+        }
 
-    // Task 4: Dynamic Round-Off & Arithmetic Auto-Balancing
-    const cgstVal = Number(cgst_amount || 0);
-    const sgstVal = Number(sgst_amount || 0);
-    const igstVal = Number(igst_amount || 0);
-    const totalTaxable = purchaseLedgerEntries.reduce((sum, e) => sum + e.amount, 0);
-    const rawSum = totalTaxable + cgstVal + sgstVal + igstVal;
-    const finalPayableTotal = Number(grand_total || 0);
-    const roundOffDiff = Number((finalPayableTotal - rawSum).toFixed(2));
-
-    // Task 5: Detailed narration with Order, Vehicle, Buyer, Ref details
-    const logisticsParts = [];
-    if (buyerOrderNo) logisticsParts.push(`Order #${buyerOrderNo}`);
-    if (vehicleNoVal) logisticsParts.push(`Vehicle #${vehicleNoVal}`);
-    if (supplier_ref) logisticsParts.push(`Ref #${supplier_ref}`);
-    if (buyerName) logisticsParts.push(`Buyer: ${buyerName}`);
-    const logisticsStr = logisticsParts.length > 0 ? ` [${logisticsParts.join(', ')}]` : '';
-
-    let itemSummary = '';
-    if (items && items.length > 0) {
-        itemSummary = items.map(it => {
-            const desc = (it.description || 'Item').trim();
-            const qty = it.quantity || 1;
-            const uom = (it.uom || it.unit || 'Nos').trim();
-            const hsn = (it.hsn_sac || it.hsn || '').trim();
-            let rate = it.gst_rate ?? it.gstRate ?? it.tax_rate ?? it.taxRate;
-            if (rate == null && (it.cgst_rate != null || it.cgstRate != null) && (it.sgst_rate != null || it.sgstRate != null)) {
-                rate = Number(it.cgst_rate ?? it.cgstRate) + Number(it.sgst_rate ?? it.sgstRate);
+        // If lineItems is completely empty, create a fallback item so the item table is always populated
+        if (lineItems.length === 0) {
+            let fallbackRate = parseFloat(d.total_taxable ?? d.taxable_amount ?? d.taxableAmount ?? 0);
+            if (fallbackRate <= 0) {
+                fallbackRate = parseFloat(d.grand_total ?? d.totalAmount ?? 0);
             }
-            if (rate == null && (it.taxable_value || it.taxableValue)) {
-                const tv = Number(it.taxable_value || it.taxableValue || 0);
-                const tax = Number(it.gst_amount || 0) || (Number(it.cgst_amount || 0) + Number(it.sgst_amount || 0) + Number(it.igst_amount || 0));
-                if (tv > 0 && tax > 0) rate = Math.round((tax / tv) * 100);
+            fallbackRate = Number(fallbackRate.toFixed(2));
+            lineItems.push({
+                description: 'General Purchase',
+                hsn_code: '',
+                quantity: 1,
+                uom: 'Nos',
+                rate: fallbackRate,
+                discount_percent: 0,
+                taxable_value: fallbackRate,
+                gst_rate: 18,
+                cgst_amount: 0,
+                sgst_amount: 0,
+                igst_amount: 0,
+                total_amount: fallbackRate
+            });
+        }
+
+        // Fix 3: Strict Pre-Export Debit === Credit Math Enforcer
+        // Calculate sumItemsTaxable = line_items.reduce((acc, item) => acc + Number(Number(item.taxable_value).toFixed(2)), 0)
+        let sumItemsTaxable = lineItems.reduce((acc, item) => acc + Number(Number(item.taxable_value).toFixed(2)), 0);
+        sumItemsTaxable = Number(sumItemsTaxable.toFixed(2));
+
+        let totalTaxable = sumItemsTaxable;
+        let totalCgst = Number(Number(d.total_cgst ?? d.taxBreakdown?.cgst ?? d.cgst_amount ?? 0).toFixed(2));
+        let totalSgst = Number(Number(d.total_sgst ?? d.taxBreakdown?.sgst ?? d.sgst_amount ?? 0).toFixed(2));
+        let totalIgst = Number(Number(d.total_igst ?? d.taxBreakdown?.igst ?? d.igst_amount ?? 0).toFixed(2));
+        let freightCharges = Number(Number(d.freight_charges ?? d.freightCharges ?? d.freight ?? 0).toFixed(2));
+        let roundOff = Number(Number(d.round_off ?? d.roundoff_amount ?? d.roundoffAmount ?? 0).toFixed(2));
+        let grandTotal = Number(Number(d.grand_total ?? d.totalAmount ?? 0).toFixed(2));
+
+        const taxesSum = Number((totalCgst + totalSgst + totalIgst + freightCharges).toFixed(2));
+        const subtotal = Number((sumItemsTaxable + taxesSum).toFixed(2));
+
+        if (grandTotal <= 0) {
+            grandTotal = Number((subtotal + roundOff).toFixed(2));
+        }
+
+        // Verify that Number((sumItemsTaxable + totalCgst + totalSgst + totalIgst + freight + roundOff).toFixed(2)) === Number(grandTotal.toFixed(2)).
+        // If there is a difference (e.g., due to edited line items), automatically set roundOff = Number((grandTotal - (sumItemsTaxable + totalCgst + totalSgst + totalIgst + freight)).toFixed(2)) so TallyPrime NEVER encounters a Debit/Credit mismatch exception.
+        const calculatedDebits = Number((sumItemsTaxable + totalCgst + totalSgst + totalIgst + freightCharges + roundOff).toFixed(2));
+        if (calculatedDebits !== Number(grandTotal.toFixed(2))) {
+            roundOff = Number((grandTotal - (sumItemsTaxable + totalCgst + totalSgst + totalIgst + freightCharges)).toFixed(2));
+        }
+
+        // Strictly ensure total debits equal total credits to the exact paisa
+        grandTotal = Number((sumItemsTaxable + totalCgst + totalSgst + totalIgst + freightCharges + roundOff).toFixed(2));
+
+        // Rich audit trail narration
+        const auditParts = [];
+        auditParts.push(`Invoice No: ${invoiceNumber}`);
+        if (isoDate || rawDate) auditParts.push(`Original Date: ${isoDate || rawDate}`);
+        if (buyerOrderNo) auditParts.push(`Order No: ${buyerOrderNo}`);
+        if (vehicleNo) auditParts.push(`Vehicle No: ${vehicleNo}`);
+        if (supplierRef) auditParts.push(`Supplier Ref: ${supplierRef}`);
+        if (buyerName) auditParts.push(`Buyer: ${buyerName}${buyerGstin ? ` (${buyerGstin})` : ''}`);
+
+        const bankParts = [];
+        if (bankName) bankParts.push(`Bank: ${bankName}`);
+        if (accountNumber) bankParts.push(`A/c: ${accountNumber}`);
+        if (ifscCode) bankParts.push(`IFSC: ${ifscCode}`);
+        if (upiId) bankParts.push(`UPI: ${upiId}`);
+        if (bankParts.length > 0) auditParts.push(`Supplier Bank: [${bankParts.join(', ')}]`);
+
+        const hsnSummarySet = new Set();
+        lineItems.forEach(it => {
+            if (it.hsn_code) {
+                hsnSummarySet.add(`${it.hsn_code} (${it.gst_rate}%)`);
             }
-            const parts = [`${qty} ${uom}`];
-            if (hsn) parts.push(`HSN ${hsn}`);
-            if (rate != null && rate !== '') parts.push(`${Number(rate)}%`);
-            return `${desc} (${parts.join(', ')})`;
-        }).join(', ');
-    }
-    const baseNarration = narration || `Purchase from ${cleanVendor} vide Inv #${invNo}`;
-    const finalNarration = `${baseNarration}${logisticsStr}${itemSummary ? ` | Items: ${itemSummary}` : ''}`;
+        });
+        if (hsnSummarySet.size > 0) {
+            auditParts.push(`HSN summary: ${Array.from(hsnSummarySet).join(', ')}`);
+        }
+
+        const autoNarration = auditParts.join(' | ');
+        const finalNarration = d.narration && !d.narration.startsWith('Purchase from')
+            ? `${d.narration} | ${autoNarration}`
+            : autoNarration;
+
+        return {
+            invoiceNumber,
+            isoDate,
+            tallyDate,
+            tallyRefDate,
+            tallyTime,
+            vendorName,
+            vendorGstin,
+            vendorState,
+            vendorAddress,
+            pincode,
+            panNumber,
+            buyerName,
+            buyerGstin,
+            buyerState,
+            buyerAddress,
+            buyerOrderNo,
+            supplierRef,
+            vehicleNo,
+            lineItems,
+            totalTaxable,
+            totalCgst,
+            totalSgst,
+            totalIgst,
+            freightCharges,
+            roundOff,
+            grandTotal,
+            narration: finalNarration
+        };
+    });
 
     let xml = `<?xml version="1.0" encoding="UTF-8"?>\n`;
     xml += `<ENVELOPE>\n`;
@@ -446,275 +603,541 @@ function generateTallyXml(data, options = {}) {
     xml += `      </REQUESTDESC>\n`;
     xml += `      <REQUESTDATA>\n`;
 
-    // 1. Party Ledger (Vendor) under Sundry Creditors
-    xml += `        <TALLYMESSAGE xmlns:UDF="TallyUDF">\n`;
-    xml += `          <LEDGER NAME="${escapeXml(cleanVendor)}" ACTION="Create">\n`;
-    xml += `            <NAME.LIST>\n`;
-    xml += `              <NAME>${escapeXml(cleanVendor)}</NAME>\n`;
-    xml += `            </NAME.LIST>\n`;
-    xml += `            <PARENT>Sundry Creditors</PARENT>\n`;
-    xml += `            <ISBILLWISEON>Yes</ISBILLWISEON>\n`;
-    if (vendorGstin) {
-        xml += `            <PARTYGSTIN>${escapeXml(vendorGstin)}</PARTYGSTIN>\n`;
-        xml += `            <GSTREGISTRATIONTYPE>Regular</GSTREGISTRATIONTYPE>\n`;
-    }
-    if (supplier_address) {
-        xml += `            <ADDRESS.LIST>\n`;
-        xml += `              <ADDRESS>${escapeXml(supplier_address)}</ADDRESS>\n`;
-        xml += `            </ADDRESS.LIST>\n`;
-    }
-    if (stateName) {
-        xml += `            <LEDSTATENAME>${escapeXml(stateName)}</LEDSTATENAME>\n`;
-    }
-    xml += `          </LEDGER>\n`;
-    xml += `        </TALLYMESSAGE>\n`;
-
-    // 2. Purchase Ledgers (Minimal master creation without uncreated tax classification)
-    purchaseLedgerEntries.forEach(entry => {
-        xml += `        <TALLYMESSAGE xmlns:UDF="TallyUDF">\n`;
-        xml += `          <LEDGER NAME="${escapeXml(entry.name)}" ACTION="Create">\n`;
-        xml += `            <NAME.LIST>\n`;
-        xml += `              <NAME>${escapeXml(entry.name)}</NAME>\n`;
-        xml += `            </NAME.LIST>\n`;
-        xml += `            <PARENT>Purchase Accounts</PARENT>\n`;
-        xml += `          </LEDGER>\n`;
-        xml += `        </TALLYMESSAGE>\n`;
+    // ── STEP 2B: MASTER BLOCK 1 — Auto-Create Unique <UNIT> Masters First ─────
+    const emittedUnits = new Set();
+    normalizedInvoices.forEach(inv => {
+        inv.lineItems.forEach(item => {
+            const uom = item.uom || 'Nos';
+            if (!emittedUnits.has(uom)) {
+                emittedUnits.add(uom);
+                xml += `        <TALLYMESSAGE xmlns:UDF="TallyUDF">\n`;
+                xml += `          <UNIT ACTION="Create" NAME="${escapeXml(uom)}">\n`;
+                xml += `            <NAME>${escapeXml(uom)}</NAME>\n`;
+                xml += `            <ISSIMPLEUNIT>Yes</ISSIMPLEUNIT>\n`;
+                xml += `          </UNIT>\n`;
+                xml += `        </TALLYMESSAGE>\n`;
+            }
+        });
     });
 
-    // 3. CGST Ledger under Duties & Taxes
-    if (cgstVal > 0) {
+    // ── STEP 2C: MASTER BLOCK 2 — Auto-Create Party, Purchase Slab, Tax, Freight & Round-Off <LEDGER> Masters
+    // 1. Party Ledger (Sundry Creditors)
+    const emittedVendors = new Set();
+    normalizedInvoices.forEach(inv => {
+        if (!emittedVendors.has(inv.vendorName)) {
+            emittedVendors.add(inv.vendorName);
+            const regType = inv.vendorGstin ? 'Regular' : 'Unregistered';
+            xml += `        <TALLYMESSAGE xmlns:UDF="TallyUDF">\n`;
+            xml += `          <LEDGER NAME="${escapeXml(inv.vendorName)}" ACTION="Create">\n`;
+            xml += `            <NAME.LIST>\n`;
+            xml += `              <NAME>${escapeXml(inv.vendorName)}</NAME>\n`;
+            xml += `            </NAME.LIST>\n`;
+            xml += `            <PARENT>Sundry Creditors</PARENT>\n`;
+            xml += `            <ISBILLWISEON>Yes</ISBILLWISEON>\n`;
+            xml += `            <COUNTRYNAME>India</COUNTRYNAME>\n`;
+            xml += `            <LEDSTATENAME>${escapeXml(inv.vendorState)}</LEDSTATENAME>\n`;
+            if (inv.pincode && /^\d{6}$/.test(String(inv.pincode).trim())) {
+                xml += `            <PINCODE>${escapeXml(String(inv.pincode).trim())}</PINCODE>\n`;
+            }
+            xml += `            <INCOMETAXNUMBER>${escapeXml(inv.panNumber)}</INCOMETAXNUMBER>\n`;
+            xml += `            <GSTREGISTRATIONTYPE>${regType}</GSTREGISTRATIONTYPE>\n`;
+            xml += `            <PARTYGSTIN>${escapeXml(inv.vendorGstin)}</PARTYGSTIN>\n`;
+            xml += `            <ADDRESS.LIST>\n`;
+            xml += `              <ADDRESS>${escapeXml(inv.vendorAddress)}</ADDRESS>\n`;
+            xml += `            </ADDRESS.LIST>\n`;
+            xml += `          </LEDGER>\n`;
+            xml += `        </TALLYMESSAGE>\n`;
+        }
+    });
+
+    // 2. Purchase Slab Ledgers (Purchase @ ${rate}%)
+    // CRITICAL: Do NOT include <TAXCLASSIFICATIONNAME> (it causes missing master exceptions in TallyPrime 4.0+)
+    const emittedSlabs = new Set();
+    normalizedInvoices.forEach(inv => {
+        inv.lineItems.forEach(item => {
+            const slabName = `Purchase @ ${item.gst_rate}%`;
+            if (!emittedSlabs.has(slabName)) {
+                emittedSlabs.add(slabName);
+                xml += `        <TALLYMESSAGE xmlns:UDF="TallyUDF">\n`;
+                xml += `          <LEDGER NAME="${escapeXml(slabName)}" ACTION="Create">\n`;
+                xml += `            <NAME.LIST>\n`;
+                xml += `              <NAME>${escapeXml(slabName)}</NAME>\n`;
+                xml += `            </NAME.LIST>\n`;
+                xml += `            <PARENT>Purchase Accounts</PARENT>\n`;
+                xml += `            <ISGSTAPPLICABLE>Applicable</ISGSTAPPLICABLE>\n`;
+                xml += `          </LEDGER>\n`;
+                xml += `        </TALLYMESSAGE>\n`;
+            }
+        });
+    });
+
+    // 3. Tax & Additional Ledgers
+    const hasCgst = normalizedInvoices.some(inv => inv.totalCgst > 0);
+    const hasSgst = normalizedInvoices.some(inv => inv.totalSgst > 0);
+    const hasIgst = normalizedInvoices.some(inv => inv.totalIgst > 0);
+    const hasFreight = normalizedInvoices.some(inv => inv.freightCharges > 0);
+    const hasRoundOff = normalizedInvoices.some(inv => Math.abs(inv.roundOff) > 0.0001);
+
+    if (hasCgst) {
         xml += `        <TALLYMESSAGE xmlns:UDF="TallyUDF">\n`;
-        xml += `          <LEDGER NAME="${escapeXml(cgst_ledger)}" ACTION="Create">\n`;
+        xml += `          <LEDGER NAME="Input CGST" ACTION="Create">\n`;
         xml += `            <NAME.LIST>\n`;
-        xml += `              <NAME>${escapeXml(cgst_ledger)}</NAME>\n`;
+        xml += `              <NAME>Input CGST</NAME>\n`;
         xml += `            </NAME.LIST>\n`;
         xml += `            <PARENT>Duties &amp; Taxes</PARENT>\n`;
-        xml += `            <TAXTYPE>GST</TAXTYPE>\n`;
-        xml += `            <GSTDUTYHEAD>Central Tax</GSTDUTYHEAD>\n`;
         xml += `          </LEDGER>\n`;
         xml += `        </TALLYMESSAGE>\n`;
     }
 
-    // 4. SGST Ledger under Duties & Taxes
-    if (sgstVal > 0) {
+    if (hasSgst) {
         xml += `        <TALLYMESSAGE xmlns:UDF="TallyUDF">\n`;
-        xml += `          <LEDGER NAME="${escapeXml(sgst_ledger)}" ACTION="Create">\n`;
+        xml += `          <LEDGER NAME="Input SGST" ACTION="Create">\n`;
         xml += `            <NAME.LIST>\n`;
-        xml += `              <NAME>${escapeXml(sgst_ledger)}</NAME>\n`;
+        xml += `              <NAME>Input SGST</NAME>\n`;
         xml += `            </NAME.LIST>\n`;
         xml += `            <PARENT>Duties &amp; Taxes</PARENT>\n`;
-        xml += `            <TAXTYPE>GST</TAXTYPE>\n`;
-        xml += `            <GSTDUTYHEAD>State Tax</GSTDUTYHEAD>\n`;
         xml += `          </LEDGER>\n`;
         xml += `        </TALLYMESSAGE>\n`;
     }
 
-    // 5. IGST Ledger under Duties & Taxes
-    if (igstVal > 0) {
+    if (hasIgst) {
         xml += `        <TALLYMESSAGE xmlns:UDF="TallyUDF">\n`;
-        xml += `          <LEDGER NAME="${escapeXml(igst_ledger)}" ACTION="Create">\n`;
+        xml += `          <LEDGER NAME="Input IGST" ACTION="Create">\n`;
         xml += `            <NAME.LIST>\n`;
-        xml += `              <NAME>${escapeXml(igst_ledger)}</NAME>\n`;
+        xml += `              <NAME>Input IGST</NAME>\n`;
         xml += `            </NAME.LIST>\n`;
         xml += `            <PARENT>Duties &amp; Taxes</PARENT>\n`;
-        xml += `            <TAXTYPE>GST</TAXTYPE>\n`;
-        xml += `            <GSTDUTYHEAD>Integrated Tax</GSTDUTYHEAD>\n`;
         xml += `          </LEDGER>\n`;
         xml += `        </TALLYMESSAGE>\n`;
     }
 
-    // 6. Round Off Ledger under Indirect Expenses (emitted only if roundOffDiff !== 0)
-    if (roundOffDiff !== 0) {
+    if (hasFreight) {
         xml += `        <TALLYMESSAGE xmlns:UDF="TallyUDF">\n`;
-        xml += `          <LEDGER NAME="${escapeXml(roundoff_ledger)}" ACTION="Create">\n`;
+        xml += `          <LEDGER NAME="Freight &amp; Packing Charges" ACTION="Create">\n`;
         xml += `            <NAME.LIST>\n`;
-        xml += `              <NAME>${escapeXml(roundoff_ledger)}</NAME>\n`;
+        xml += `              <NAME>Freight &amp; Packing Charges</NAME>\n`;
+        xml += `            </NAME.LIST>\n`;
+        xml += `            <PARENT>Direct Expenses</PARENT>\n`;
+        xml += `          </LEDGER>\n`;
+        xml += `        </TALLYMESSAGE>\n`;
+    }
+
+    if (hasRoundOff) {
+        xml += `        <TALLYMESSAGE xmlns:UDF="TallyUDF">\n`;
+        xml += `          <LEDGER NAME="Round Off" ACTION="Create">\n`;
+        xml += `            <NAME.LIST>\n`;
+        xml += `              <NAME>Round Off</NAME>\n`;
         xml += `            </NAME.LIST>\n`;
         xml += `            <PARENT>Indirect Expenses</PARENT>\n`;
         xml += `          </LEDGER>\n`;
         xml += `        </TALLYMESSAGE>\n`;
     }
 
-    // ── PURCHASE VOUCHER ─────────────────────────────────────────────────
-    xml += `        <TALLYMESSAGE xmlns:UDF="TallyUDF">\n`;
-    xml += `          <VOUCHER VCHTYPE="Purchase" ACTION="Create" OBJVIEW="Accounting Voucher View">\n`;
-    xml += `            <DATE>${tallyDate}</DATE>\n`;
-    xml += `            <EFFECTIVEDATE>${tallyDate}</EFFECTIVEDATE>\n`;
-    xml += `            <VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>\n`;
-    xml += `            <VOUCHERNUMBER>${escapeXml(invNo)}</VOUCHERNUMBER>\n`;
-    xml += `            <REFERENCE>${escapeXml(invNo)}</REFERENCE>\n`;
-    xml += `            <PARTYNAME>${escapeXml(cleanVendor)}</PARTYNAME>\n`;
-    xml += `            <PARTYLEDGERNAME>${escapeXml(cleanVendor)}</PARTYLEDGERNAME>\n`;
-    if (vendorGstin) {
-        xml += `            <PARTYGSTIN>${escapeXml(vendorGstin)}</PARTYGSTIN>\n`;
-    }
-    xml += `            <GSTREGISTRATIONTYPE>Regular</GSTREGISTRATIONTYPE>\n`;
-    if (stateName) {
-        xml += `            <STATENAME>${escapeXml(stateName)}</STATENAME>\n`;
-        xml += `            <PLACEOFSUPPLY>${escapeXml(stateName)}</PLACEOFSUPPLY>\n`;
-    }
-    xml += `            <ISINVOICE>Yes</ISINVOICE>\n`;
-    xml += `            <ISREVERSECHARGEAPPLICABLE>${isRcm ? 'Yes' : 'No'}</ISREVERSECHARGEAPPLICABLE>\n`;
-    xml += `            <PERSISTEDVIEW>Accounting Voucher View</PERSISTEDVIEW>\n`;
-    xml += `            <NARRATION>${escapeXml(finalNarration)}</NARRATION>\n`;
-
-    // ── LEDGER ENTRIES ───────────────────────────────────────────────────
-    // A. Party Ledger — CREDIT entry
-    xml += `            <ALLLEDGERENTRIES.LIST>\n`;
-    xml += `              <LEDGERNAME>${escapeXml(cleanVendor)}</LEDGERNAME>\n`;
-    xml += `              <ISPARTYLEDGER>Yes</ISPARTYLEDGER>\n`;
-    xml += `              <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>\n`;
-    xml += `              <AMOUNT>${finalPayableTotal.toFixed(2)}</AMOUNT>\n`;
-    xml += `              <BILLALLOCATIONS.LIST>\n`;
-    xml += `                <NAME>${escapeXml(invNo)}</NAME>\n`;
-    xml += `                <BILLTYPE>New Ref</BILLTYPE>\n`;
-    xml += `                <AMOUNT>${finalPayableTotal.toFixed(2)}</AMOUNT>\n`;
-    xml += `              </BILLALLOCATIONS.LIST>\n`;
-    xml += `            </ALLLEDGERENTRIES.LIST>\n`;
-
-    // B. Purchase Ledgers — DEBIT entries (grouped by GST slab)
-    purchaseLedgerEntries.forEach(entry => {
-        xml += `            <ALLLEDGERENTRIES.LIST>\n`;
-        xml += `              <LEDGERNAME>${escapeXml(entry.name)}</LEDGERNAME>\n`;
-        xml += `              <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>\n`;
-        xml += `              <AMOUNT>-${entry.amount.toFixed(2)}</AMOUNT>\n`;
-        xml += `            </ALLLEDGERENTRIES.LIST>\n`;
+    // ── STEP 2D: MASTER BLOCK 3 — Auto-Create <STOCKITEM> Masters with HSN Details ──
+    const emittedStockItems = new Set();
+    normalizedInvoices.forEach(inv => {
+        inv.lineItems.forEach(item => {
+            const itemName = item.description || 'Item';
+            if (!emittedStockItems.has(itemName)) {
+                emittedStockItems.add(itemName);
+                const uom = item.uom || 'Nos';
+                const hsnCode = item.hsn_code || '';
+                xml += `        <TALLYMESSAGE xmlns:UDF="TallyUDF">\n`;
+                xml += `          <STOCKITEM NAME="${escapeXml(itemName)}" ACTION="Create">\n`;
+                xml += `            <NAME.LIST>\n`;
+                xml += `              <NAME>${escapeXml(itemName)}</NAME>\n`;
+                xml += `            </NAME.LIST>\n`;
+                xml += `            <BASEUNITS>${escapeXml(uom)}</BASEUNITS>\n`;
+                xml += `            <GSTAPPLICABLE>Applicable</GSTAPPLICABLE>\n`;
+                xml += `            <HSNDETAILS.LIST>\n`;
+                xml += `              <HSNCODE>${escapeXml(hsnCode)}</HSNCODE>\n`;
+                xml += `              <SRCOFHSNDETAILS>Specify Details Here</SRCOFHSNDETAILS>\n`;
+                xml += `            </HSNDETAILS.LIST>\n`;
+                xml += `          </STOCKITEM>\n`;
+                xml += `        </TALLYMESSAGE>\n`;
+            }
+        });
     });
 
-    // C. CGST Ledger — DEBIT entry
-    if (cgstVal > 0) {
-        xml += `            <ALLLEDGERENTRIES.LIST>\n`;
-        xml += `              <LEDGERNAME>${escapeXml(cgst_ledger)}</LEDGERNAME>\n`;
-        xml += `              <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>\n`;
-        xml += `              <AMOUNT>-${cgstVal.toFixed(2)}</AMOUNT>\n`;
-        xml += `            </ALLLEDGERENTRIES.LIST>\n`;
-    }
+    // ── STEP 2E: TRANSACTION BLOCK — Emit <VOUCHER> in "Invoice Voucher View" ───────
+    // Fix 1: All <ALLINVENTORYENTRIES.LIST> blocks first (contiguous), followed immediately
+    // by all <LEDGERENTRIES.LIST> blocks (Party + Taxes + Freight + Round Off) in one unbroken sequence.
+    normalizedInvoices.forEach(inv => {
+        const strictDate = (inv.tallyDate && /^\d{8}$/.test(inv.tallyDate))
+            ? inv.tallyDate
+            : formatTallyDate(inv.rawDate || inv.isoDate);
+        const tallyRefDate = (inv.tallyRefDate && /^\d{8}$/.test(inv.tallyRefDate))
+            ? inv.tallyRefDate
+            : strictDate;
 
-    // D. SGST Ledger — DEBIT entry
-    if (sgstVal > 0) {
-        xml += `            <ALLLEDGERENTRIES.LIST>\n`;
-        xml += `              <LEDGERNAME>${escapeXml(sgst_ledger)}</LEDGERNAME>\n`;
-        xml += `              <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>\n`;
-        xml += `              <AMOUNT>-${sgstVal.toFixed(2)}</AMOUNT>\n`;
-        xml += `            </ALLLEDGERENTRIES.LIST>\n`;
-    }
+        xml += `        <TALLYMESSAGE xmlns:UDF="TallyUDF">\n`;
+        xml += `          <VOUCHER VCHTYPE="Purchase" ACTION="Create" OBJVIEW="Invoice Voucher View">\n`;
+        xml += `            <DATE>${strictDate}</DATE>\n`;
+        xml += `            <EFFECTIVEDATE>${strictDate}</EFFECTIVEDATE>\n`;
+        xml += `            <REFERENCEDATE>${tallyRefDate}</REFERENCEDATE>\n`;
+        xml += `            <VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>\n`;
+        xml += `            <VOUCHERNUMBER>${escapeXml(inv.invoiceNumber)}</VOUCHERNUMBER>\n`;
+        xml += `            <REFERENCE>${escapeXml(inv.invoiceNumber)}</REFERENCE>\n`;
+        xml += `            <PARTYLEDGERNAME>${escapeXml(inv.vendorName)}</PARTYLEDGERNAME>\n`;
+        xml += `            <PARTYNAME>${escapeXml(inv.vendorName)}</PARTYNAME>\n`;
+        xml += `            <BASICBASEPARTYNAME>${escapeXml(inv.vendorName)}</BASICBASEPARTYNAME>\n`;
+        xml += `            <PARTYGSTIN>${escapeXml(inv.vendorGstin || '')}</PARTYGSTIN>\n`;
+        xml += `            <STATENAME>${escapeXml(inv.vendorState)}</STATENAME>\n`;
+        xml += `            <PLACEOFSUPPLY>${escapeXml(inv.vendorState)}</PLACEOFSUPPLY>\n`;
+        xml += `            <ISINVOICE>Yes</ISINVOICE>\n`;
+        xml += `            <PERSISTEDVIEW>Invoice Voucher View</PERSISTEDVIEW>\n`;
+        xml += `            <BASICBUYERORDERNO>${escapeXml(inv.buyerOrderNo || '')}</BASICBUYERORDERNO>\n`;
+        xml += `            <BASICSHIPDOCUMENTNO>${escapeXml(inv.supplierRef || '')}</BASICSHIPDOCUMENTNO>\n`;
+        xml += `            <BASICSHIPVESSELNO>${escapeXml(inv.vehicleNo || '')}</BASICSHIPVESSELNO>\n`;
+        xml += `            <NARRATION>${escapeXml(inv.narration || '')}</NARRATION>\n`;
 
-    // E. IGST Ledger — DEBIT entry
-    if (igstVal > 0) {
-        xml += `            <ALLLEDGERENTRIES.LIST>\n`;
-        xml += `              <LEDGERNAME>${escapeXml(igst_ledger)}</LEDGERNAME>\n`;
-        xml += `              <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>\n`;
-        xml += `              <AMOUNT>-${igstVal.toFixed(2)}</AMOUNT>\n`;
-        xml += `            </ALLLEDGERENTRIES.LIST>\n`;
-    }
+        // Block A — All <ALLINVENTORYENTRIES.LIST> Blocks First (Contiguous)
+        inv.lineItems.forEach(item => {
+            const itemName = item.description || 'Item';
+            const uom = item.uom || 'Nos';
+            const slabName = `Purchase @ ${item.gst_rate}%`;
+            const itemAmount = Number(item.taxable_value).toFixed(2);
 
-    // F. Round Off Ledger — Dynamic Auto-balanced Debit/Credit
-    if (roundOffDiff !== 0) {
-        const isDebit = roundOffDiff > 0;
-        xml += `            <ALLLEDGERENTRIES.LIST>\n`;
-        xml += `              <LEDGERNAME>${escapeXml(roundoff_ledger)}</LEDGERNAME>\n`;
-        xml += `              <ISDEEMEDPOSITIVE>${isDebit ? 'Yes' : 'No'}</ISDEEMEDPOSITIVE>\n`;
-        xml += `              <AMOUNT>${isDebit ? '-' : ''}${Math.abs(roundOffDiff).toFixed(2)}</AMOUNT>\n`;
-        xml += `            </ALLLEDGERENTRIES.LIST>\n`;
-    }
+            xml += `            <ALLINVENTORYENTRIES.LIST>\n`;
+            xml += `              <STOCKITEMNAME>${escapeXml(itemName)}</STOCKITEMNAME>\n`;
+            xml += `              <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>\n`;
+            xml += `              <ISLASTDEEMEDPOSITIVE>Yes</ISLASTDEEMEDPOSITIVE>\n`;
+            xml += `              <RATE>${Number(item.rate).toFixed(2)}/${escapeXml(uom)}</RATE>\n`;
+            xml += `              <DISCOUNT>${item.discount_percent || 0}</DISCOUNT>\n`;
+            xml += `              <AMOUNT>-${itemAmount}</AMOUNT>\n`;
+            xml += `              <ACTUALQTY> ${item.quantity} ${escapeXml(uom)}</ACTUALQTY>\n`;
+            xml += `              <BILLEDQTY> ${item.quantity} ${escapeXml(uom)}</BILLEDQTY>\n`;
+            xml += `              <ACCOUNTINGALLOCATIONS.LIST>\n`;
+            xml += `                <LEDGERNAME>${escapeXml(slabName)}</LEDGERNAME>\n`;
+            xml += `                <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>\n`;
+            xml += `                <ISLASTDEEMEDPOSITIVE>Yes</ISLASTDEEMEDPOSITIVE>\n`;
+            xml += `                <AMOUNT>-${itemAmount}</AMOUNT>\n`;
+            xml += `              </ACCOUNTINGALLOCATIONS.LIST>\n`;
+            xml += `            </ALLINVENTORYENTRIES.LIST>\n`;
+        });
 
-    xml += `          </VOUCHER>\n`;
-    xml += `        </TALLYMESSAGE>\n`;
+        // Block B — All <LEDGERENTRIES.LIST> Blocks Together Immediately After Inventory (Contiguous!)
+        // 1. First <LEDGERENTRIES.LIST> (Party Credit)
+        xml += `            <LEDGERENTRIES.LIST>\n`;
+        xml += `              <LEDGERNAME>${escapeXml(inv.vendorName)}</LEDGERNAME>\n`;
+        xml += `              <ISPARTYLEDGER>Yes</ISPARTYLEDGER>\n`;
+        xml += `              <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>\n`;
+        xml += `              <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>\n`;
+        xml += `              <AMOUNT>${inv.grandTotal.toFixed(2)}</AMOUNT>\n`;
+        xml += `              <BILLALLOCATIONS.LIST>\n`;
+        xml += `                <NAME>${escapeXml(inv.invoiceNumber)}</NAME>\n`;
+        xml += `                <BILLTYPE>New Ref</BILLTYPE>\n`;
+        xml += `                <AMOUNT>${inv.grandTotal.toFixed(2)}</AMOUNT>\n`;
+        xml += `              </BILLALLOCATIONS.LIST>\n`;
+        xml += `            </LEDGERENTRIES.LIST>\n`;
+
+        // 2. Next <LEDGERENTRIES.LIST> (Tax Ledgers — Input CGST, Input SGST, Input IGST)
+        if (inv.totalCgst > 0) {
+            xml += `            <LEDGERENTRIES.LIST>\n`;
+            xml += `              <LEDGERNAME>Input CGST</LEDGERNAME>\n`;
+            xml += `              <ISPARTYLEDGER>No</ISPARTYLEDGER>\n`;
+            xml += `              <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>\n`;
+            xml += `              <ISLASTDEEMEDPOSITIVE>Yes</ISLASTDEEMEDPOSITIVE>\n`;
+            xml += `              <AMOUNT>-${inv.totalCgst.toFixed(2)}</AMOUNT>\n`;
+            xml += `            </LEDGERENTRIES.LIST>\n`;
+        }
+
+        if (inv.totalSgst > 0) {
+            xml += `            <LEDGERENTRIES.LIST>\n`;
+            xml += `              <LEDGERNAME>Input SGST</LEDGERNAME>\n`;
+            xml += `              <ISPARTYLEDGER>No</ISPARTYLEDGER>\n`;
+            xml += `              <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>\n`;
+            xml += `              <ISLASTDEEMEDPOSITIVE>Yes</ISLASTDEEMEDPOSITIVE>\n`;
+            xml += `              <AMOUNT>-${inv.totalSgst.toFixed(2)}</AMOUNT>\n`;
+            xml += `            </LEDGERENTRIES.LIST>\n`;
+        }
+
+        if (inv.totalIgst > 0) {
+            xml += `            <LEDGERENTRIES.LIST>\n`;
+            xml += `              <LEDGERNAME>Input IGST</LEDGERNAME>\n`;
+            xml += `              <ISPARTYLEDGER>No</ISPARTYLEDGER>\n`;
+            xml += `              <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>\n`;
+            xml += `              <ISLASTDEEMEDPOSITIVE>Yes</ISLASTDEEMEDPOSITIVE>\n`;
+            xml += `              <AMOUNT>-${inv.totalIgst.toFixed(2)}</AMOUNT>\n`;
+            xml += `            </LEDGERENTRIES.LIST>\n`;
+        }
+
+        // Freight Entry (if > 0)
+        if (inv.freightCharges > 0) {
+            xml += `            <LEDGERENTRIES.LIST>\n`;
+            xml += `              <LEDGERNAME>Freight &amp; Packing Charges</LEDGERNAME>\n`;
+            xml += `              <ISPARTYLEDGER>No</ISPARTYLEDGER>\n`;
+            xml += `              <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>\n`;
+            xml += `              <ISLASTDEEMEDPOSITIVE>Yes</ISLASTDEEMEDPOSITIVE>\n`;
+            xml += `              <AMOUNT>-${inv.freightCharges.toFixed(2)}</AMOUNT>\n`;
+            xml += `            </LEDGERENTRIES.LIST>\n`;
+        }
+
+        // 3. Last <LEDGERENTRIES.LIST> (Round Off)
+        if (Math.abs(inv.roundOff) > 0.0001) {
+            const isRoundUp = inv.roundOff > 0;
+            xml += `            <LEDGERENTRIES.LIST>\n`;
+            xml += `              <LEDGERNAME>Round Off</LEDGERNAME>\n`;
+            xml += `              <ISPARTYLEDGER>No</ISPARTYLEDGER>\n`;
+            xml += `              <ISDEEMEDPOSITIVE>${isRoundUp ? 'Yes' : 'No'}</ISDEEMEDPOSITIVE>\n`;
+            xml += `              <ISLASTDEEMEDPOSITIVE>${isRoundUp ? 'Yes' : 'No'}</ISLASTDEEMEDPOSITIVE>\n`;
+            xml += `              <AMOUNT>${isRoundUp ? '-' : ''}${Math.abs(inv.roundOff).toFixed(2)}</AMOUNT>\n`;
+            xml += `            </LEDGERENTRIES.LIST>\n`;
+        }
+
+        xml += `          </VOUCHER>\n`;
+        xml += `        </TALLYMESSAGE>\n`;
+    });
+
     xml += `      </REQUESTDATA>\n`;
     xml += `    </IMPORTDATA>\n`;
     xml += `  </BODY>\n`;
     xml += `</ENVELOPE>`;
 
-    return xml;
+    return xml.replace(/&#4;\s*/g, '');
 }
 
-// Utility: Audit math check & status calculation
-function auditInvoiceData(raw) {
-    const taxable = parseFloat(raw.taxable_amount || raw.taxableAmount || 0);
-    const cgst = parseFloat(raw.cgst_amount || 0);
-    const sgst = parseFloat(raw.sgst_amount || 0);
-    const igst = parseFloat(raw.igst_amount || 0);
-    let roundoff = parseFloat(raw.roundoff_amount || raw.roundoffAmount || 0);
-    let grandTotal = parseFloat(raw.grand_total || raw.totalAmount || 0);
+// Utility: Audit math check & complete bookkeeper schema normalization
+function auditInvoiceData(raw = {}) {
+    raw = raw || {};
 
-    const calculatedSubtotal = Math.round((taxable + cgst + sgst + igst) * 100) / 100;
-    const diffWithRoundoff = Math.round((grandTotal - (calculatedSubtotal + roundoff)) * 100) / 100;
-
-    let mathDiff = diffWithRoundoff;
-
-    if (Math.abs(diffWithRoundoff) > 0 && Math.abs(diffWithRoundoff) <= 1.0) {
-        roundoff = Math.round((grandTotal - calculatedSubtotal) * 100) / 100;
-        mathDiff = 0.0;
-    } else if (Math.abs(diffWithRoundoff) === 0) {
-        mathDiff = 0.0;
+    // 1. Supplier Fields
+    const vendorName = (raw.vendor_name || raw.supplier_name || raw.vendorName || '').trim();
+    const vendorGstin = (raw.vendor_gstin || raw.supplier_gstin || raw.gstin || '').trim().toUpperCase();
+    const vendorAddress = (raw.vendor_address || raw.supplier_address || raw.supplierAddress || '').trim();
+    const derivedVendorState = getStateFromGstin(vendorGstin, raw.vendor_state || raw.supplier_state || raw.place_of_supply || raw.placeOfSupply || 'Delhi');
+    const vendorState = (raw.vendor_state || raw.supplier_state || derivedVendorState || 'Delhi').trim();
+    const rawPin = (raw.vendor_pincode || raw.pincode || '').toString().trim();
+    let vendorPincode = '';
+    if (/^\d{6}$/.test(rawPin)) {
+        vendorPincode = rawPin;
     } else {
-        // Fix hallucinated grandTotal if subtotal + tax + roundoff equals verified math
-        const verifiedTotal = Math.round((calculatedSubtotal + roundoff) * 100) / 100;
-        if (verifiedTotal > 0) {
-            grandTotal = verifiedTotal;
-            mathDiff = 0.0;
-        }
+        const pinMatch = vendorAddress.match(/\b\d{6}\b/);
+        vendorPincode = pinMatch ? pinMatch[0] : '';
     }
+    const vendorPhone = (raw.vendor_phone || raw.phone || '').trim();
+    const bankName = (raw.bank_name || raw.bankName || '').trim();
+    const accountNumber = (raw.account_number || raw.accountNumber || '').trim();
+    const ifscCode = (raw.ifsc_code || raw.ifscCode || '').trim();
+    const upiId = (raw.upi_id || raw.upiId || '').trim();
 
-    const vendorName = (raw.supplier_name || raw.vendor_name || raw.vendorName || '').trim();
-    const invNum = (raw.invoice_number || raw.invoiceNumber || '').trim();
-    const gstin = (raw.supplier_gstin || raw.gstin || '').trim();
-    const isGstinValid = gstin ? validateGstin(gstin) : false;
-    const hasEssentialFields = Boolean(vendorName && invNum && grandTotal > 0);
-
-    let status = 'needs_review';
-    if (mathDiff !== 0.0) {
-        status = 'math_error';
-    } else if (hasEssentialFields && isGstinValid) {
-        status = 'verified';
-    } else if (hasEssentialFields) {
-        status = 'needs_review';
-    }
-
-    const reverseChargeRaw = raw.reverse_charge || raw.reverseCharge || 'NO';
-    const reverseCharge = String(reverseChargeRaw).trim().toUpperCase() === 'YES' ? 'YES' : 'NO';
+    // 2. Buyer Fields
     const buyerName = (raw.buyer_name || raw.buyerName || '').trim();
     const buyerGstin = (raw.buyer_gstin || raw.buyerGstin || '').trim().toUpperCase();
-    const buyerOrderNo = (raw.buyer_order_no || raw.buyerOrderNo || '').trim();
-    const supplierRef = (raw.supplier_ref || raw.supplierRef || '').trim();
-    const vehicleNo = (raw.vehicle_no || raw.vehicleNumber || raw.vehicle_number || '').trim();
-    const paymentMode = (raw.payment_mode || raw.paymentMode || '').trim();
+    const derivedBuyerState = getStateFromGstin(buyerGstin, raw.buyer_state || raw.buyerState || '');
+    const buyerState = (raw.buyer_state || raw.buyerState || derivedBuyerState || '').trim();
+    const buyerAddress = (raw.buyer_address || raw.buyerAddress || '').trim();
 
-    const normalizedItems = (raw.items || []).map(item => {
-        const uom = item.uom || item.unit || 'Nos';
+    // 3. Tax Classification (Intra-State vs Inter-State)
+    const rawPrintedCgst = parseFloat(raw.printed_cgst_total ?? raw.total_cgst ?? raw.taxBreakdown?.cgst ?? raw.cgst_amount ?? 0);
+    const rawPrintedSgst = parseFloat(raw.printed_sgst_total ?? raw.total_sgst ?? raw.taxBreakdown?.sgst ?? raw.sgst_amount ?? 0);
+    const rawPrintedIgst = parseFloat(raw.printed_igst_total ?? raw.total_igst ?? raw.taxBreakdown?.igst ?? raw.igst_amount ?? 0);
+    const hasCgstSgst = (rawPrintedCgst > 0 || rawPrintedSgst > 0);
+    const statesDiffer = Boolean(buyerState && vendorState && vendorState.toLowerCase() !== buyerState.toLowerCase());
+    const isInterState = (rawPrintedIgst > 0 && !hasCgstSgst) || (statesDiffer && !hasCgstSgst && rawPrintedIgst > 0);
+
+    // 4. Line Items Normalization
+    const rawItems = raw.line_items || raw.items || [];
+    const VALID_GST_SLABS = [0, 5, 12, 18, 28];
+
+    const normalizedLineItems = rawItems.map((item, idx) => {
+        const srNo = Number(item.sr_no ?? item.sr ?? idx + 1);
+        const desc = (item.description || item.itemName || item.name || 'Item').trim();
+        const hsn = String(item.hsn_code ?? item.hsn_sac ?? item.hsn ?? '').trim();
+        const qty = Number(item.quantity ?? item.qty ?? 1);
+        const uom = String(item.uom || item.unit || 'Nos').trim() || 'Nos';
+        let rate = Number(item.rate ?? 0);
+        const disc = Number(item.discount_percent ?? item.discount ?? 0);
+
+        let tv = round2(qty * rate * (1 - disc / 100));
+        if (tv <= 0) {
+            tv = Number(item.taxable_value ?? item.taxableValue ?? 0);
+        }
+        if (rate <= 0 && tv > 0 && qty > 0) {
+            rate = round2(tv / qty);
+        }
+
+        let gstRate = Number(item.gst_rate ?? item.gstRate ?? item.tax_rate ?? item.taxRate);
+        if (isNaN(gstRate) || gstRate == null) {
+            if (item.cgst_rate != null && item.sgst_rate != null) {
+                gstRate = Number(item.cgst_rate) + Number(item.sgst_rate);
+            } else if ((item.cgst_amount || item.sgst_amount || item.igst_amount) && tv > 0) {
+                const itemTax = Number(item.cgst_amount || 0) + Number(item.sgst_amount || 0) + Number(item.igst_amount || 0);
+                gstRate = Math.round((itemTax / tv) * 100);
+            } else {
+                gstRate = 18;
+            }
+        }
+        if (!VALID_GST_SLABS.includes(gstRate)) {
+            const closest = VALID_GST_SLABS.reduce((prev, curr) => Math.abs(curr - gstRate) < Math.abs(prev - gstRate) ? curr : prev);
+            gstRate = closest;
+        }
+
+        const itemTaxTotal = round2(tv * (gstRate / 100));
+        let cgstAmt = 0;
+        let sgstAmt = 0;
+        let igstAmt = 0;
+
+        if (isInterState) {
+            igstAmt = itemTaxTotal;
+        } else {
+            cgstAmt = round2(itemTaxTotal / 2);
+            sgstAmt = round2(itemTaxTotal / 2);
+        }
+
+        const totAmt = round2(tv + cgstAmt + sgstAmt + igstAmt);
+
         return {
-            ...item,
-            uom,
+            sr_no: srNo,
+            description: desc,
+            hsn_code: hsn,
+            hsn_sac: hsn,
+            quantity: qty,
+            uom: uom,
             unit: uom,
-            gst_rate: item.gst_rate ?? item.tax_rate ?? null
+            rate: rate,
+            discount_percent: disc,
+            taxable_value: tv,
+            gst_rate: Number(gstRate),
+            cgst_amount: cgstAmt,
+            sgst_amount: sgstAmt,
+            igst_amount: igstAmt,
+            total_amount: totAmt
         };
     });
 
+    // 5. Pure Accounting Math Calculation
+    const itemsTaxableSum = round2(normalizedLineItems.reduce((acc, it) => acc + (it.taxable_value || 0), 0));
+    const totalTaxable = itemsTaxableSum;
+
+    const expectedTax = round2(normalizedLineItems.reduce((acc, it) => acc + (it.taxable_value * (it.gst_rate / 100)), 0));
+
+    let totalCgst = 0;
+    let totalSgst = 0;
+    let totalIgst = 0;
+
+    if (isInterState) {
+        totalIgst = expectedTax;
+    } else {
+        totalCgst = round2(expectedTax / 2);
+        totalSgst = round2(expectedTax / 2);
+    }
+
+    const freightCharges = round2(parseFloat(raw.freight_charges ?? raw.freightCharges ?? raw.freight ?? 0));
+    const calculatedTotalBeforeRoundOff = round2(itemsTaxableSum + totalCgst + totalSgst + totalIgst + freightCharges);
+
+    const printedGrandTotal = parseFloat(raw.printed_grand_total ?? raw.grand_total ?? raw.totalAmount ?? 0);
+    const printedRoundOff = parseFloat(raw.printed_round_off ?? raw.round_off ?? raw.roundoff_amount ?? 0);
+
+    let grandTotal = 0;
+    let roundOff = 0;
+
+    if (printedGrandTotal > 0 && Math.abs(printedGrandTotal - calculatedTotalBeforeRoundOff) <= 1.0) {
+        grandTotal = round2(printedGrandTotal);
+        roundOff = round2(grandTotal - calculatedTotalBeforeRoundOff);
+    } else if (printedGrandTotal > 0) {
+        // Never overwrite grand_total to a mismatched number that contradicts taxable + tax + round_off
+        grandTotal = round2(printedGrandTotal);
+        roundOff = round2(printedRoundOff);
+    } else {
+        roundOff = round2(printedRoundOff);
+        grandTotal = round2(calculatedTotalBeforeRoundOff + roundOff);
+    }
+
+    const actualDebits = round2(itemsTaxableSum + totalCgst + totalSgst + totalIgst + freightCharges + roundOff);
+    const balanceDiff = round2(actualDebits - grandTotal);
+    let mathDiff = balanceDiff;
+
+    let status = 'verified';
+    if (Math.abs(balanceDiff) <= 0.05) {
+        mathDiff = 0.0;
+        status = 'verified';
+    } else {
+        status = 'math_error';
+    }
+
+    // 6. Header Fields
+    const invNum = (raw.invoice_number || raw.invoiceNumber || '').trim();
+    const rawDate = raw.invoice_date || raw.invoiceDate || '';
+    const invDateIso = parseIndianDateToISO(rawDate);
+    const dueDateIso = (raw.due_date || raw.dueDate) ? parseIndianDateToISO(raw.due_date || raw.dueDate) : '';
+    const paymentMode = (raw.payment_mode || raw.paymentMode || '').trim();
+    const reverseChargeRaw = raw.reverse_charge || raw.reverseCharge || 'No';
+    const reverseCharge = String(reverseChargeRaw).trim().toLowerCase() === 'yes' ? 'Yes' : 'No';
+    const buyerOrderNo = (raw.buyer_order_no || raw.buyerOrderNo || '').trim();
+    const orderDateIso = (raw.order_date || raw.orderDate) ? parseIndianDateToISO(raw.order_date || raw.orderDate) : '';
+    const supplierRef = (raw.supplier_ref || raw.supplierRef || '').trim();
+    const vehicleNo = (raw.vehicle_no || raw.vehicleNumber || raw.vehicle_number || '').trim();
+    const ewayBillNo = (raw.eway_bill_no || raw.ewayBillNo || '').trim();
+
+    if (!vendorName || !invNum || grandTotal <= 0) {
+        if (status !== 'math_error') {
+            status = 'needs_review';
+        }
+    }
+
     return {
-        invoice_number: invNum,
-        invoice_date: parseIndianDateToISO(raw.invoice_date || raw.invoiceDate || ''),
+        // Complete Bookkeeper OCR Schema
         vendor_name: vendorName,
-        gstin: gstin.toUpperCase(),
-        reverse_charge: reverseCharge,
+        vendor_gstin: vendorGstin,
+        vendor_address: vendorAddress,
+        vendor_state: vendorState,
+        vendor_pincode: vendorPincode,
+        vendor_phone: vendorPhone,
+        bank_name: bankName,
+        account_number: accountNumber,
+        ifsc_code: ifscCode,
+        upi_id: upiId,
+
         buyer_name: buyerName,
         buyer_gstin: buyerGstin,
+        buyer_state: buyerState,
+        buyer_address: buyerAddress,
+
+        invoice_number: invNum,
+        invoice_date: invDateIso,
+        due_date: dueDateIso,
+        payment_mode: paymentMode,
+        reverse_charge: reverseCharge,
         buyer_order_no: buyerOrderNo,
+        order_date: orderDateIso,
         supplier_ref: supplierRef,
         vehicle_no: vehicleNo,
-        vehicle_number: vehicleNo,
-        payment_mode: paymentMode,
-        supplier_address: raw.supplier_address || '',
-        supplier_state: raw.supplier_state || raw.place_of_supply || '',
-        place_of_supply: raw.place_of_supply || raw.supplier_state || '',
-        taxable_amount: taxable,
-        cgst_amount: cgst,
-        sgst_amount: sgst,
-        igst_amount: igst,
-        roundoff_amount: roundoff,
+        eway_bill_no: ewayBillNo,
+
+        line_items: normalizedLineItems,
+        total_taxable: totalTaxable,
+        total_cgst: totalCgst,
+        total_sgst: totalSgst,
+        total_igst: totalIgst,
+        freight_charges: freightCharges,
+        round_off: roundOff,
         grand_total: grandTotal,
+
+        printed_taxable_subtotal: parseFloat(raw.printed_taxable_subtotal ?? 0),
+        printed_cgst_total: parseFloat(raw.printed_cgst_total ?? 0),
+        printed_sgst_total: parseFloat(raw.printed_sgst_total ?? 0),
+        printed_igst_total: parseFloat(raw.printed_igst_total ?? 0),
+        printed_round_off: parseFloat(raw.printed_round_off ?? 0),
+        printed_grand_total: printedGrandTotal,
+
         verification_state: status,
         math_difference: mathDiff,
-        items: normalizedItems
+
+        // Backward compatibility aliases
+        items: normalizedLineItems,
+        taxable_amount: totalTaxable,
+        cgst_amount: totalCgst,
+        sgst_amount: totalSgst,
+        igst_amount: totalIgst,
+        roundoff_amount: roundOff,
+        roundOff: roundOff ? Number(roundOff).toFixed(2) : '0.00',
+        supplier_name: vendorName,
+        supplier_gstin: vendorGstin,
+        gstin: vendorGstin,
+        supplier_address: vendorAddress,
+        supplier_state: vendorState,
+        place_of_supply: vendorState
     };
 }
 
@@ -727,53 +1150,90 @@ function fileToGenerativePart(filePath, mimeType) {
         }
     };
 }
-// Helper: Call Gemini AI with gemini-2.5-flash and retry mechanism
+
+// Helper: Call Gemini AI with gemini-2.5-flash and retry mechanism (Task 1 & Task 2)
 async function processFileWithGemini(genAI, filePath, mimeType, res = null) {
     const imagePart = fileToGenerativePart(filePath, mimeType);
     const prompt = `
-    Extract invoice metadata from this Indian vendor invoice image or document.
-    Return a valid JSON object with the following exact keys:
-    - "invoice_number": (string) Unique invoice or bill number
-    - "invoice_date": (string) Date in YYYY-MM-DD or DD-MM-YYYY or DD-MM-YY format
-    - "reverse_charge": (string) "YES" or "NO"
-    - "buyer_name": (string) Full name of the buyer / Bill To customer (e.g. Rajiv Gupta)
-    - "buyer_gstin": (string) GSTIN of the buyer if present
-    - "buyer_order_no": (string) Buyer's order number (e.g. B4589)
-    - "supplier_ref": (string) Supplier's reference (e.g. S145)
-    - "vehicle_no": (string) Vehicle number (e.g. V1456)
-    - "payment_mode": (string) Payment mode (e.g. UPI, Cash, Bank Transfer)
-    - "supplier_name": (string) Supplier/seller company full name
-    - "supplier_gstin": (string) 15-character GSTIN number of the vendor (supplier)
-    - "supplier_address": (string) Full address of the supplier
-    - "supplier_state": (string) State of the supplier
-    - "taxable_amount": (number) Subtotal taxable amount before tax
-    - "cgst_amount": (number) Central GST amount (0.0 if not present)
-    - "sgst_amount": (number) State GST amount (0.0 if not present)
-    - "igst_amount": (number) Integrated GST amount (0.0 if not present)
-    - "roundoff_amount": (number) Rounding adjustment amount
-    - "grand_total": (number) Final payable total amount
-    - "place_of_supply": (string) Place/State of supply (e.g. Delhi, Maharashtra)
-    - "items": (array of objects) Extract EVERY single line item present in the invoice table without summarizing, grouping, or truncating the list. Each object must have:
-        - "description": (string) Item description / Ledger
-        - "hsn_sac": (string) HSN/SAC code
-        - "quantity": (number) Item quantity
-        - "uom": (string) Unit of measure (e.g., "Nos", "Box", "Pkt")
-        - "unit": (string) Same as uom (e.g., "Nos", "Box", "Pkt")
-        - "rate": (number) Item rate (₹)
-        - "taxable_value": (number) Taxable value of the item
-        - "gst_rate": (number) GST rate applied (e.g., 12, 18)
-        - "gst_amount": (number) Total GST amount for the item
-        - "total": (number) Final total for the item
+    Extract complete invoice metadata from this Indian vendor invoice image or document.
+    Return a valid JSON object strictly matching this complete bookkeeper schema:
+    {
+      "vendor_name": "Supplier / Vendor business name",
+      "vendor_gstin": "15-character GSTIN of the supplier (null if unregistered or missing)",
+      "vendor_address": "Complete registered or street address of the supplier (null if missing)",
+      "vendor_state": "State of the supplier (e.g. Maharashtra, Delhi, Gujarat) (null if missing)",
+      "vendor_pincode": "6-digit postal PIN code of the supplier (null if missing)",
+      "vendor_phone": "Contact or phone/mobile number of the supplier (null if missing)",
+      "bank_name": "Supplier bank name (e.g. HDFC Bank, ICICI Bank, State Bank of India) (null if missing)",
+      "account_number": "Supplier bank account number (null if missing)",
+      "ifsc_code": "Supplier bank 11-character IFSC code (null if missing)",
+      "upi_id": "Supplier UPI ID or VPA (e.g. vendor@okaxis) (null if missing)",
 
-    STRICT DIRECTIVES:
-    1. If the document is rotated, visually auto-orient it before extraction.
-    2. If the document contains excessive terms or marketing text, ignore it. Extract ONLY the requested JSON keys.
-    3. If a data point (like GSTIN or HSN) is missing, output null for text and 0 for numeric fields. Do NOT refuse to extract the document.
-    4. Visual Primacy: You must extract the EXACT numeric values printed on the invoice image for Rate and Taxable Value. DO NOT guess or alter numbers. If an item says '750', extract '750'.
-    5. Mathematical Validation Order: When cross-checking (Quantity * Rate = Taxable Value), if the math does not align, assume your OCR/vision reading of the numbers is wrong. Re-read the image carefully. DO NOT alter the extracted 'Taxable Value' to fit a hallucinated 'Rate'. The final Taxable Value column is your absolute source of truth.
-    6. Grand Total Validation: Before returning the JSON, add up the 'taxable_value' of every single line item. This sum MUST equal the 'Sub-Total' or 'Total Taxable Value' printed at the bottom of the invoice table. If it does not match, you have misread an item's rate or taxable value.
+      "buyer_name": "Buyer / Bill To / Ship To company or customer name (null if missing)",
+      "buyer_gstin": "15-character GSTIN of the buyer (null if missing)",
+      "buyer_state": "State of the buyer / Place of supply (null if missing)",
+      "buyer_address": "Delivery or billing address of the buyer (null if missing)",
 
-    Ensure numeric amounts are precise numbers without currency symbols.
+      "invoice_number": "Invoice, Tax Invoice, or Bill number",
+      "invoice_date": "Invoice date parsed strictly from Indian format (DD-MM-YY or DD-MM-YYYY) into ISO YYYY-MM-DD",
+      "due_date": "Payment due date in ISO YYYY-MM-DD format (null if not specified)",
+      "payment_mode": "Payment mode (e.g. UPI, Cash, Bank Transfer, Cheque, Credit) (null if not specified)",
+      "reverse_charge": "\"Yes\" or \"No\" (strictly \"Yes\" or \"No\", defaults to \"No\")",
+      "buyer_order_no": "Buyer purchase order number (P.O. No) (null if missing)",
+      "order_date": "Order date in ISO YYYY-MM-DD format (null if missing)",
+      "supplier_ref": "Supplier reference / challan / dispatch number (null if missing)",
+      "vehicle_no": "Vehicle or transport number (null if missing)",
+      "eway_bill_no": "E-Way Bill number (null if missing)",
+
+      "line_items": [
+        {
+          "sr_no": 1,
+          "description": "Item or product description / ledger name",
+          "hsn_code": "HSN or SAC code string (e.g. \"8471\", \"9983\") (null if missing)",
+          "quantity": 1,
+          "uom": "Unit of measurement string (e.g. \"Nos\", \"Box\", \"Pkt\", \"Kgs\", \"Pcs\" - default to \"Nos\" if blank)",
+          "rate": 100.0,
+          "discount_percent": 0.0,
+          "taxable_value": 100.0,
+          "gst_rate": 18,
+          "cgst_amount": 9.0,
+          "sgst_amount": 9.0,
+          "igst_amount": 0.0,
+          "total_amount": 118.0
+        }
+      ],
+
+      "printed_taxable_subtotal": 100.0,
+      "printed_cgst_total": 9.0,
+      "printed_sgst_total": 9.0,
+      "printed_igst_total": 0.0,
+      "printed_round_off": 0.0,
+      "printed_grand_total": 118.0,
+
+      "total_taxable": 100.0,
+      "total_cgst": 9.0,
+      "total_sgst": 9.0,
+      "total_igst": 0.0,
+      "freight_charges": 0.0,
+      "round_off": 0.0,
+      "grand_total": 118.0
+    }
+
+    STRICT BOOKKEEPER OCR RULES:
+    1. STRICT SEQUENTIAL ROW EXTRACTION (Sr 1 to Sr N):
+       - CRITICAL: Scan the line-item table starting immediately below the column header row (e.g., "Sr | Goods & Service Description | HSN | Quantity | Rate | Taxable | GST | Total").
+       - Do NOT skip Row 1 (Sr 1), even if it is flush against the header border or has a small amount.
+       - Extract the "sr_no" for every row.
+       - Before returning JSON, verify that line_items.length matches the final Sr number printed in the table (e.g., if Sr goes from 1 to 8, line_items MUST contain all 8 items) and that the sum of line_items[].taxable_value equals the printed Sub-Total.
+    2. PRESERVE PRINTED SUMMARY TOTALS SEPARATELY:
+       - Extract "printed_taxable_subtotal", "printed_cgst_total", "printed_sgst_total", "printed_igst_total", "printed_round_off", and "printed_grand_total" directly from the bottom summary box/table of the invoice.
+    3. Indian Date Parsing Rule: Indian invoices print dates as DD-MM-YYYY or DD-MM-YY (e.g. 10-01-25 is January 10th 2025, NOT October 1st). Parse strictly into ISO YYYY-MM-DD.
+    4. Full Line Items Array: Extract EVERY single line item present in the invoice table without summarizing, grouping, or truncating.
+    5. uom: If unit is not explicitly written on the item line, default to "Nos".
+    6. Visual Primacy: Extract the EXACT numeric values printed on the invoice for Rate and Taxable Value. DO NOT guess or alter numbers. If an item says '10.00', extract 10.00.
+    7. Reverse Charge: Must be strictly "Yes" or "No".
+    8. Null safety: If a text field is absent from the document, output null for text and 0 for numeric fields. Do NOT refuse to extract the document.
+    9. Grand Total Validation: Ensure numeric amounts are precise numbers without currency symbols.
     `;
 
     const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
@@ -784,13 +1244,52 @@ async function processFileWithGemini(genAI, filePath, mimeType, res = null) {
         try {
             const result = await model.generateContent([prompt, imagePart]);
             let responseText = result.response.text();
+            let parsedData;
             try {
-                return JSON.parse(responseText);
+                parsedData = JSON.parse(responseText);
             } catch (jsonErr) {
                 // If partial JSON is returned, sanitize it and return it instead of throwing a 500 error
                 const sanitized = responseText.replace(/```json/gi, '').replace(/```/g, '').trim();
-                return JSON.parse(sanitized);
+                parsedData = JSON.parse(sanitized);
             }
+
+            // Auto-Recovery Retry When a Table Row is Missed
+            if (parsedData) {
+                const lineItems = Array.isArray(parsedData.line_items) ? parsedData.line_items : [];
+                const printedSubTotal = Number(parsedData.printed_taxable_subtotal || parsedData.total_taxable || 0);
+                const itemsTaxableSum = round2(lineItems.reduce((s, i) => s + Number(i.taxable_value || (i.quantity * i.rate) || 0), 0));
+
+                if (printedSubTotal > 0 && Math.abs(itemsTaxableSum - printedSubTotal) > 1.0) {
+                    console.warn(`[Gemini AI] Taxable sum mismatch detected (items: ${itemsTaxableSum}, printed subtotal: ${printedSubTotal}). Attempting auto-recovery retry...`);
+                    try {
+                        const diff = round2(printedSubTotal - itemsTaxableSum);
+                        const retryPrompt = `Your previous extraction summed to ${itemsTaxableSum}, but the printed Sub-Total on the invoice is ${printedSubTotal} (difference: ${diff}). You missed a row (check Row 1 right under the table header). Return the complete JSON with ALL rows included.`;
+                        const retryResult = await model.generateContent([
+                            prompt + "\n\nCRITICAL AUTO-RECOVERY RETRY INSTRUCTION:\n" + retryPrompt,
+                            imagePart
+                        ]);
+                        let retryText = retryResult.response.text();
+                        let retryJSON;
+                        try {
+                            retryJSON = JSON.parse(retryText);
+                        } catch (e) {
+                            const clean = retryText.replace(/```json/gi, '').replace(/```/g, '').trim();
+                            retryJSON = JSON.parse(clean);
+                        }
+                        if (retryJSON && Array.isArray(retryJSON.line_items)) {
+                            const retryItemsSum = round2(retryJSON.line_items.reduce((s, i) => s + Number(i.taxable_value || (i.quantity * i.rate) || 0), 0));
+                            console.log(`[Gemini AI] Auto-recovery retry completed: items count=${retryJSON.line_items.length}, sum=${retryItemsSum}`);
+                            if (Math.abs(retryItemsSum - printedSubTotal) <= Math.abs(itemsTaxableSum - printedSubTotal)) {
+                                parsedData = retryJSON;
+                            }
+                        }
+                    } catch (retryErr) {
+                        console.warn(`[Gemini AI] Auto-recovery retry encountered an error:`, retryErr.message);
+                    }
+                }
+            }
+
+            return parsedData;
         } catch (err) {
             lastError = err;
             console.warn(`[Gemini AI] Attempt ${attempt} failed:`, err.message);
@@ -824,8 +1323,6 @@ async function processFileWithGemini(genAI, filePath, mimeType, res = null) {
 
     throw new Error(`AI extraction failed: ${lastError ? lastError.message : 'Unknown error'}`);
 }
-
-
 
 // API ENDPOINT: POST /api/vendors
 app.post('/api/vendors', (req, res) => {
@@ -881,6 +1378,53 @@ app.post('/api/extract-invoice', ClerkExpressRequireAuth({}), extractLimiter, up
                         fileName: file.originalname,
                         fileSize: formatBytes(file.size),
                         fileType: file.mimetype.includes('pdf') ? 'pdf' : 'image',
+
+                        // Full Bookkeeper OCR Schema (Task 1)
+                        vendor_name: audited.vendor_name,
+                        vendor_gstin: audited.vendor_gstin,
+                        vendor_address: audited.vendor_address,
+                        vendor_state: audited.vendor_state,
+                        vendor_pincode: audited.vendor_pincode,
+                        vendor_phone: audited.vendor_phone,
+                        bank_name: audited.bank_name,
+                        account_number: audited.account_number,
+                        ifsc_code: audited.ifsc_code,
+                        upi_id: audited.upi_id,
+
+                        buyer_name: audited.buyer_name,
+                        buyer_gstin: audited.buyer_gstin,
+                        buyer_state: audited.buyer_state,
+                        buyer_address: audited.buyer_address,
+
+                        invoice_number: audited.invoice_number,
+                        invoice_date: audited.invoice_date,
+                        due_date: audited.due_date,
+                        payment_mode: audited.payment_mode,
+                        reverse_charge: audited.reverse_charge,
+                        buyer_order_no: audited.buyer_order_no,
+                        order_date: audited.order_date,
+                        supplier_ref: audited.supplier_ref,
+                        vehicle_no: audited.vehicle_no,
+                        eway_bill_no: audited.eway_bill_no,
+
+                        line_items: audited.line_items,
+                        total_taxable: audited.total_taxable,
+                        total_cgst: audited.total_cgst,
+                        total_sgst: audited.total_sgst,
+                        total_igst: audited.total_igst,
+                        freight_charges: audited.freight_charges,
+                        round_off: audited.round_off,
+                        grand_total: audited.grand_total,
+
+                        printed_taxable_subtotal: audited.printed_taxable_subtotal,
+                        printed_cgst_total: audited.printed_cgst_total,
+                        printed_sgst_total: audited.printed_sgst_total,
+                        printed_igst_total: audited.printed_igst_total,
+                        printed_round_off: audited.printed_round_off,
+                        printed_grand_total: audited.printed_grand_total,
+
+                        // Frontend aliases for full seamless UI reactivity
+                        vendorName: audited.vendor_name,
                         invoiceNumber: audited.invoice_number,
                         invoiceDate: audited.invoice_date,
                         reverseCharge: audited.reverse_charge,
@@ -891,22 +1435,22 @@ app.post('/api/extract-invoice', ClerkExpressRequireAuth({}), extractLimiter, up
                         vehicleNo: audited.vehicle_no,
                         vehicleNumber: audited.vehicle_no,
                         paymentMode: audited.payment_mode,
-                        supplierAddress: audited.supplier_address,
-                        supplierState: audited.supplier_state,
-                        vendorName: audited.vendor_name,
-                        gstin: audited.gstin,
-                        placeOfSupply: audited.place_of_supply || 'Delhi',
+                        supplierAddress: audited.vendor_address,
+                        supplierState: audited.vendor_state,
+                        gstin: audited.vendor_gstin,
+                        placeOfSupply: audited.vendor_state || 'Delhi',
                         tallyLedgerName: finalLedgerName,
-                        narration: extractedRaw.narration || `Purchase from ${audited.vendor_name || 'Vendor'} vide Invoice #${audited.invoice_number || ''}`,
-                        items: audited.items,
-                        taxableAmount: audited.taxable_amount,
+                        narration: audited.narration,
+                        items: audited.line_items,
+                        taxableAmount: audited.total_taxable,
+                        freightCharges: audited.freight_charges,
                         taxBreakdown: {
-                            cgst: audited.cgst_amount,
-                            sgst: audited.sgst_amount,
-                            igst: audited.igst_amount
+                            cgst: audited.total_cgst,
+                            sgst: audited.total_sgst,
+                            igst: audited.total_igst
                         },
-                        roundoffAmount: audited.roundoff_amount,
-                        roundOff: audited.roundoff_amount ? Number(audited.roundoff_amount).toFixed(2) : '0.00',
+                        roundoffAmount: audited.round_off,
+                        roundOff: audited.round_off ? Number(audited.round_off).toFixed(2) : '0.00',
                         totalAmount: audited.grand_total,
                         verificationState: audited.verification_state,
                         mathDifference: audited.math_difference,
@@ -1005,7 +1549,11 @@ app.get('/api/invoices', ClerkExpressRequireAuth({}), (req, res) => {
             }
             const data = rows.map(row => {
                 try {
-                    return JSON.parse(row.fullData);
+                    const parsed = JSON.parse(row.fullData);
+                    if (parsed && (!parsed.tallyXml || parsed.tallyXml.includes('<ALLLEDGERENTRIES.LIST>') || parsed.tallyXml.includes('<TAXTYPE>GST</TAXTYPE>'))) {
+                        parsed.tallyXml = generateTallyXml(parsed);
+                    }
+                    return parsed;
                 } catch (e) {
                     return null;
                 }
@@ -1048,32 +1596,54 @@ app.put('/api/invoices/:id', ClerkExpressRequireAuth({}), (req, res) => {
             // Merge updates into existing record
             const merged = { ...existing, ...updates, id };
 
+            // Ensure date fields updated from audit review take strict priority
+            const updatedDate = updates.invoiceDate || updates.invoice_date || updates.date;
+            if (updatedDate) {
+                merged.invoiceDate = updatedDate;
+                merged.invoice_date = updatedDate;
+                merged.date = updatedDate;
+            }
+
             // Build the data object expected by generateTallyXml
             const xmlInput = {
-                invoice_number:    merged.invoiceNumber   || merged.invoice_number   || '',
-                invoice_date:      parseIndianDateToISO(merged.invoiceDate || merged.invoice_date || ''),
-                vendor_name:       merged.vendorName      || merged.vendor_name      || '',
-                gstin:             merged.gstin           || '',
-                supplier_address:  merged.supplierAddress || merged.supplier_address || '',
-                supplier_state:    merged.supplierState   || merged.supplier_state   || '',
-                place_of_supply:   merged.placeOfSupply   || merged.place_of_supply  || '',
-                buyer_name:        merged.buyerName       || merged.buyer_name       || '',
-                buyer_gstin:       merged.buyerGstin      || merged.buyer_gstin      || '',
-                buyer_order_no:    merged.buyerOrderNo    || merged.buyer_order_no   || '',
-                supplier_ref:      merged.supplierRef     || merged.supplier_ref     || '',
-                vehicle_no:        merged.vehicleNo       || merged.vehicleNumber    || merged.vehicle_number || '',
-                vehicle_number:    merged.vehicleNo       || merged.vehicleNumber    || merged.vehicle_number || '',
-                payment_mode:      merged.paymentMode     || merged.payment_mode     || '',
-                reverse_charge:    merged.reverseCharge   || merged.reverse_charge   || 'NO',
-                taxable_amount:    parseFloat(merged.taxableAmount  || merged.taxable_amount  || 0),
-                cgst_amount:       parseFloat(merged.taxBreakdown?.cgst || merged.cgst_amount || 0),
-                sgst_amount:       parseFloat(merged.taxBreakdown?.sgst || merged.sgst_amount || 0),
-                igst_amount:       parseFloat(merged.taxBreakdown?.igst || merged.igst_amount || 0),
-                roundoff_amount:   parseFloat(merged.roundoffAmount || merged.roundoff_amount || 0),
-                grand_total:       parseFloat(merged.totalAmount    || merged.grand_total     || 0),
-                purchase_ledger:   merged.tallyLedgerName || 'Purchase Account',
-                narration:         merged.narration       || '',
-                items:             merged.items || []
+                invoice_number:   merged.invoice_number || merged.invoiceNumber || '',
+                invoice_date:     parseIndianDateToISO(merged.invoiceDate || merged.invoice_date || merged.date || ''),
+                due_date:         merged.due_date || merged.dueDate || '',
+                payment_mode:     merged.payment_mode || merged.paymentMode || '',
+                reverse_charge:   merged.reverse_charge || merged.reverseCharge || 'No',
+                buyer_order_no:   merged.buyer_order_no || merged.buyerOrderNo || '',
+                order_date:       merged.order_date || merged.orderDate || '',
+                supplier_ref:     merged.supplier_ref || merged.supplierRef || '',
+                vehicle_no:       merged.vehicle_no || merged.vehicleNumber || merged.vehicle_number || '',
+                eway_bill_no:     merged.eway_bill_no || merged.ewayBillNo || '',
+
+                vendor_name:      merged.vendor_name || merged.vendorName || '',
+                vendor_gstin:     merged.vendor_gstin || merged.gstin || '',
+                vendor_address:   merged.vendor_address || merged.supplier_address || merged.supplierAddress || '',
+                vendor_state:     merged.vendor_state || merged.supplier_state || merged.place_of_supply || merged.placeOfSupply || '',
+                vendor_pincode:   merged.vendor_pincode || merged.pincode || '',
+                vendor_phone:     merged.vendor_phone || merged.phone || '',
+                bank_name:        merged.bank_name || merged.bankName || '',
+                account_number:   merged.account_number || merged.accountNumber || '',
+                ifsc_code:        merged.ifsc_code || merged.ifscCode || '',
+                upi_id:           merged.upi_id || merged.upiId || '',
+
+                buyer_name:       merged.buyer_name || merged.buyerName || '',
+                buyer_gstin:      merged.buyer_gstin || merged.buyerGstin || '',
+                buyer_state:      merged.buyer_state || merged.buyerState || '',
+                buyer_address:    merged.buyer_address || merged.buyerAddress || '',
+
+                line_items:       merged.line_items || merged.items || [],
+                items:            merged.line_items || merged.items || [],
+                total_taxable:    parseFloat(merged.total_taxable ?? merged.taxableAmount ?? merged.taxable_amount ?? 0),
+                total_cgst:       parseFloat(merged.total_cgst ?? merged.taxBreakdown?.cgst ?? merged.cgst_amount ?? 0),
+                total_sgst:       parseFloat(merged.total_sgst ?? merged.taxBreakdown?.sgst ?? merged.sgst_amount ?? 0),
+                total_igst:       parseFloat(merged.total_igst ?? merged.taxBreakdown?.igst ?? merged.igst_amount ?? 0),
+                freight_charges:  parseFloat(merged.freight_charges ?? merged.freightCharges ?? 0),
+                round_off:        parseFloat(merged.round_off ?? merged.roundoffAmount ?? merged.roundoff_amount ?? 0),
+                grand_total:      parseFloat(merged.grand_total ?? merged.totalAmount ?? 0),
+                purchase_ledger:  merged.tallyLedgerName || 'Purchase Account',
+                narration:        merged.narration || ''
             };
 
             // Regenerate Tally XML with current field values
@@ -1179,6 +1749,7 @@ app.use((err, req, res, next) => {
 });
 
 // Start Server
+if (require.main === module) {
 app.listen(PORT, () => {
     console.log(`========================================================`);
     console.log(`⚡ TallyFlow AI Backend Middleware Server Running`);
@@ -1187,15 +1758,22 @@ app.listen(PORT, () => {
     console.log(`🚀 API Endpoint:   http://localhost:${PORT}/api/extract-invoice`);
     console.log(`========================================================`);
 });
+}
 
 // Export helpers for testing and external integrations
 module.exports = {
     app,
     parseIndianDateToISO,
     formatDateForTallyXML,
+    formatTallyDate,
+    useEduSafeDate,
     getTallyEduSafeDate,
     getStateFromGstin,
+    getPanFromGstin,
     GSTIN_STATE_MAP,
     generateTallyXml,
+    auditInvoiceData,
+    processFileWithGemini,
+    round2,
     escapeXml
 };
