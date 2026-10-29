@@ -519,15 +519,15 @@ function generateTallyXml(data, options = {}) {
             grandTotal = Number((subtotal + roundOff).toFixed(2));
         }
 
-        // Verify that Number((sumItemsTaxable + totalCgst + totalSgst + totalIgst + freight + roundOff).toFixed(2)) === Number(grandTotal.toFixed(2)).
-        // If there is a difference (e.g., due to edited line items), automatically set roundOff = Number((grandTotal - (sumItemsTaxable + totalCgst + totalSgst + totalIgst + freight)).toFixed(2)) so TallyPrime NEVER encounters a Debit/Credit mismatch exception.
+        // Strictly ensure total debits equal total credits to the exact paisa
         const calculatedDebits = Number((sumItemsTaxable + totalCgst + totalSgst + totalIgst + freightCharges + roundOff).toFixed(2));
         if (calculatedDebits !== Number(grandTotal.toFixed(2))) {
-            roundOff = Number((grandTotal - (sumItemsTaxable + totalCgst + totalSgst + totalIgst + freightCharges)).toFixed(2));
+            const diff = Number((grandTotal - (sumItemsTaxable + totalCgst + totalSgst + totalIgst + freightCharges)).toFixed(2));
+            if (Math.abs(diff) <= 0.99) {
+                roundOff = diff;
+            }
+            grandTotal = Number((sumItemsTaxable + totalCgst + totalSgst + totalIgst + freightCharges + roundOff).toFixed(2));
         }
-
-        // Strictly ensure total debits equal total credits to the exact paisa
-        grandTotal = Number((sumItemsTaxable + totalCgst + totalSgst + totalIgst + freightCharges + roundOff).toFixed(2));
 
         // Rich audit trail narration
         const auditParts = [];
@@ -894,7 +894,32 @@ function generateTallyXml(data, options = {}) {
     xml += `  </BODY>\n`;
     xml += `</ENVELOPE>`;
 
-    return xml.replace(/&#4;\s*/g, '');
+    return xml.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]|&#4;\s*/g, '');
+}
+
+// Utility: Dynamic subset-sum solver to find items matching target taxable amount within tolerance
+function findSubsetSum(items, target, tolerance = 0.05) {
+    if (!items || items.length === 0 || target <= 0) return null;
+    for (const item of items) {
+        if (Math.abs(item.taxable_value - target) <= tolerance) {
+            return [item];
+        }
+    }
+    function search(idx, currentSum, chosen) {
+        if (Math.abs(currentSum - target) <= tolerance) {
+            return chosen;
+        }
+        if (currentSum > target + tolerance || idx >= items.length) {
+            return null;
+        }
+        const withItem = search(idx + 1, currentSum + items[idx].taxable_value, [...chosen, items[idx]]);
+        if (withItem) return withItem;
+        return search(idx + 1, currentSum, chosen);
+    }
+    if (items.length <= 40) {
+        return search(0, 0, []);
+    }
+    return null;
 }
 
 // Utility: Audit math check & complete bookkeeper schema normalization
@@ -936,41 +961,82 @@ function auditInvoiceData(raw = {}) {
     const statesDiffer = Boolean(buyerState && vendorState && vendorState.toLowerCase() !== buyerState.toLowerCase());
     const isInterState = (rawPrintedIgst > 0 && !hasCgstSgst) || (statesDiffer && !hasCgstSgst && rawPrintedIgst > 0);
 
-    // 4. Line Items Normalization
+    // 4. Line Items Normalization (Law 1 & Law 2)
     const rawItems = raw.line_items || raw.items || [];
-    const VALID_GST_SLABS = [0, 5, 12, 18, 28];
+    const VALID_GST_SLABS = [0, 0.25, 3, 5, 12, 18, 28];
 
     const normalizedLineItems = rawItems.map((item, idx) => {
         const srNo = Number(item.sr_no ?? item.sr ?? idx + 1);
         const desc = (item.description || item.itemName || item.name || 'Item').trim();
         const hsn = String(item.hsn_code ?? item.hsn_sac ?? item.hsn ?? '').trim();
-        const qty = Number(item.quantity ?? item.qty ?? 1);
+        let qty = Number(item.quantity ?? item.qty ?? 1);
         const uom = String(item.uom || item.unit || 'Nos').trim() || 'Nos';
-        let rate = Number(item.rate ?? 0);
+        const rawRate = Number(item.rate ?? 0);
+        const rawRateIncl = Number(item.rate_incl_gst ?? item.rate_inclusive ?? item.rateInclTax ?? 0);
         const disc = Number(item.discount_percent ?? item.discount ?? 0);
+        const discAmt = Number(item.discount_amount ?? item.discountAmount ?? 0);
+        let tv = Number(item.taxable_value ?? item.taxableValue ?? item.net_amount ?? item.netAmount ?? 0);
+        let rate = rawRate;
 
-        let tv = round2(qty * rate * (1 - disc / 100));
-        if (tv <= 0) {
-            tv = Number(item.taxable_value ?? item.taxableValue ?? 0);
-        }
-        if (rate <= 0 && tv > 0 && qty > 0) {
-            rate = round2(tv / qty);
-        }
-
-        let gstRate = Number(item.gst_rate ?? item.gstRate ?? item.tax_rate ?? item.taxRate);
-        if (isNaN(gstRate) || gstRate == null) {
-            if (item.cgst_rate != null && item.sgst_rate != null) {
-                gstRate = Number(item.cgst_rate) + Number(item.sgst_rate);
-            } else if ((item.cgst_amount || item.sgst_amount || item.igst_amount) && tv > 0) {
-                const itemTax = Number(item.cgst_amount || 0) + Number(item.sgst_amount || 0) + Number(item.igst_amount || 0);
-                gstRate = Math.round((itemTax / tv) * 100);
-            } else {
-                gstRate = 18;
+        // Dual-rate implied GST calculation (Task 2.3)
+        let impliedGst = null;
+        if (rawRateIncl > 0 && rate > 0) {
+            if (Math.abs(rawRateIncl - rate) <= 0.05) {
+                impliedGst = 0;
+            } else if (rawRateIncl > rate) {
+                const rawDiffPct = ((rawRateIncl - rate) / rate) * 100;
+                impliedGst = [5, 12, 18, 28].reduce((prev, curr) => Math.abs(curr - rawDiffPct) < Math.abs(prev - rawDiffPct) ? curr : prev);
             }
         }
+
+        // GST rate parsing (Task 2.2: Blank/Nil/Exempt = 0%, NEVER guess or default to 5% or 18%)
+        const rawGstRate = item.gst_rate ?? item.gstRate ?? item.tax_rate ?? item.taxRate;
+        const rawGstStr = String(rawGstRate ?? '').trim().toLowerCase();
+        let gstRate = 0;
+        const isBlankOrExempt = (rawGstRate === undefined || rawGstRate === null || rawGstStr === '' || rawGstStr === '-' || rawGstStr === 'nil' || rawGstStr === 'exempt' || rawGstStr === '0%');
+        if (!isBlankOrExempt) {
+            gstRate = Number(rawGstStr.replace(/[^0-9.]/g, ''));
+            if (isNaN(gstRate)) gstRate = 0;
+        }
+
+        if (gstRate === 0 && impliedGst !== null && impliedGst > 0) {
+            gstRate = impliedGst;
+        } else if (gstRate === 0 && !isBlankOrExempt && (Number(item.cgst_amount) > 0 || Number(item.sgst_amount) > 0 || Number(item.igst_amount) > 0) && tv > 0) {
+            const itemTax = Number(item.cgst_amount || 0) + Number(item.sgst_amount || 0) + Number(item.igst_amount || 0);
+            gstRate = Math.round((itemTax / tv) * 100);
+        }
+
         if (!VALID_GST_SLABS.includes(gstRate)) {
-            const closest = VALID_GST_SLABS.reduce((prev, curr) => Math.abs(curr - gstRate) < Math.abs(prev - gstRate) ? curr : prev);
-            gstRate = closest;
+            gstRate = VALID_GST_SLABS.reduce((prev, curr) => Math.abs(curr - gstRate) < Math.abs(prev - gstRate) ? curr : prev);
+        }
+
+        // Rate, Quantity & Taxable Value Triangle Check
+        if (rate <= 0 && tv > 0 && qty > 0) {
+            rate = round2((tv + discAmt) / (qty * (1 - disc / 100)));
+        }
+
+        const expectedTv = round2(qty * rate * (1 - disc / 100) - discAmt);
+        if (tv > 0 && rate > 0) {
+            if (Math.abs(expectedTv - tv) <= 0.15) {
+                // Trust printed taxable_value (NET AMOUNT) within 15 paise
+            } else {
+                // Discrepancy > 0.15: Check if rate was entered as inclusive rate (gross rate)
+                if (gstRate > 0 && Math.abs(round2(qty * (rate / (1 + gstRate / 100)) * (1 - disc / 100) - discAmt) - tv) <= 0.15) {
+                    rate = round2(rate / (1 + gstRate / 100));
+                } else {
+                    // Check if quantity was misread and ratio = tv / effRate is near integer
+                    const effRate = rate * (1 - disc / 100);
+                    if (effRate > 0) {
+                        const ratio = (tv + discAmt) / effRate;
+                        const roundedQty = Math.round(ratio);
+                        if (roundedQty > 0 && Math.abs(ratio - roundedQty) < 0.05) {
+                            qty = roundedQty;
+                        }
+                    }
+                }
+            }
+        } else if (tv <= 0 && qty > 0 && rate > 0) {
+            tv = expectedTv;
         }
 
         const itemTaxTotal = round2(tv * (gstRate / 100));
@@ -996,7 +1062,9 @@ function auditInvoiceData(raw = {}) {
             uom: uom,
             unit: uom,
             rate: rate,
+            rate_incl_gst: rawRateIncl > 0 ? rawRateIncl : null,
             discount_percent: disc,
+            discount_amount: discAmt,
             taxable_value: tv,
             gst_rate: Number(gstRate),
             cgst_amount: cgstAmt,
@@ -1006,24 +1074,117 @@ function auditInvoiceData(raw = {}) {
         };
     });
 
-    // 5. Pure Accounting Math Calculation
-    const itemsTaxableSum = round2(normalizedLineItems.reduce((acc, it) => acc + (it.taxable_value || 0), 0));
-    const totalTaxable = itemsTaxableSum;
+    // 5. Universal Tax Reconciliation with Slab Cross-Verification (Law 3 - ZERO hardcoding)
+    const printedCgst = parseFloat(raw.printed_cgst_total ?? raw.total_cgst ?? 0);
+    const printedSgst = parseFloat(raw.printed_sgst_total ?? raw.total_sgst ?? 0);
+    const printedIgst = parseFloat(raw.printed_igst_total ?? raw.total_igst ?? 0);
+    const printedTotalTax = round2(printedCgst + printedSgst + printedIgst);
 
-    const expectedTax = round2(normalizedLineItems.reduce((acc, it) => acc + (it.taxable_value * (it.gst_rate / 100)), 0));
+    // Cross-check with printed_tax_slab_summary if provided
+    const slabSummary = Array.isArray(raw.printed_tax_slab_summary) ? raw.printed_tax_slab_summary : [];
+    if (slabSummary.length > 0) {
+        slabSummary.forEach(slab => {
+            const sRate = Number(slab.gst_rate ?? 0);
+            const sTaxable = round2(parseFloat(slab.taxable_value ?? 0));
+            if (sTaxable > 0) {
+                const currentMatchingItems = normalizedLineItems.filter(it => it.gst_rate === sRate);
+                const currentSum = round2(currentMatchingItems.reduce((acc, it) => acc + it.taxable_value, 0));
+                if (sRate === 0 && Math.abs(currentSum - sTaxable) > 1.00 && currentSum < sTaxable) {
+                    // Some 0% exempt items were misclassified into higher tax slabs
+                    const missingTaxable = round2(sTaxable - currentSum);
+                    const nonZeroItems = normalizedLineItems.filter(it => it.gst_rate > 0);
+                    const subset = findSubsetSum(nonZeroItems, missingTaxable);
+                    if (subset && subset.length > 0) {
+                        subset.forEach(it => {
+                            it.gst_rate = 0;
+                            it.cgst_amount = 0;
+                            it.sgst_amount = 0;
+                            it.igst_amount = 0;
+                            it.total_amount = it.taxable_value;
+                        });
+                    }
+                }
+            }
+        });
+    }
 
+    // Secondary universal check: if line-item taxes exceed printed tax breakdown by > ₹1.00
+    let currentExpectedTax = round2(normalizedLineItems.reduce((acc, it) => acc + (it.taxable_value * (it.gst_rate / 100)), 0));
+    if (printedTotalTax > 0 && (currentExpectedTax - printedTotalTax) > 1.00) {
+        const taxDiff = round2(currentExpectedTax - printedTotalTax);
+        const candidateItems = normalizedLineItems.filter(it => {
+            const rawItem = rawItems[it.sr_no - 1] || {};
+            const rGst = rawItem.gst_rate ?? rawItem.gstRate ?? rawItem.tax_rate ?? '';
+            return rGst === '' || rGst === 0 || rGst === '0' || rGst === '-' || rGst === '0%' || rawItem.cgst_amount === 0;
+        });
+        if (candidateItems.length > 0) {
+            const candSum = round2(candidateItems.reduce((acc, it) => acc + it.taxable_value, 0));
+            const printedZero = parseFloat(raw.printed_zero_rated_taxable ?? 0);
+            if ((printedZero > 0 && Math.abs(candSum - printedZero) <= 5.00) || Math.abs(round2(candSum * 0.05) - taxDiff) <= 1.00) {
+                candidateItems.forEach(it => {
+                    it.gst_rate = 0;
+                    it.cgst_amount = 0;
+                    it.sgst_amount = 0;
+                    it.igst_amount = 0;
+                    it.total_amount = it.taxable_value;
+                });
+                currentExpectedTax = round2(normalizedLineItems.reduce((acc, it) => acc + (it.taxable_value * (it.gst_rate / 100)), 0));
+            }
+        }
+    }
+
+    // 6. Tax Totals & Deviation Healing (<= ₹0.50)
     let totalCgst = 0;
     let totalSgst = 0;
     let totalIgst = 0;
 
     if (isInterState) {
-        totalIgst = expectedTax;
+        totalIgst = (printedIgst > 0 && Math.abs(printedIgst - currentExpectedTax) <= 0.50) ? printedIgst : currentExpectedTax;
     } else {
-        totalCgst = round2(expectedTax / 2);
-        totalSgst = round2(expectedTax / 2);
+        if (printedCgst > 0 && printedSgst > 0 && Math.abs((printedCgst + printedSgst) - currentExpectedTax) <= 0.50) {
+            totalCgst = printedCgst;
+            totalSgst = printedSgst;
+        } else {
+            totalCgst = round2(currentExpectedTax / 2);
+            totalSgst = round2(currentExpectedTax / 2);
+        }
     }
 
-    const freightCharges = round2(parseFloat(raw.freight_charges ?? raw.freightCharges ?? raw.freight ?? 0));
+    // Align line-item taxes with locked totals to avoid 1-paisa rounding drifts
+    if (isInterState) {
+        const lineIgstSum = round2(normalizedLineItems.reduce((acc, it) => acc + it.igst_amount, 0));
+        const diff = round2(totalIgst - lineIgstSum);
+        if (Math.abs(diff) <= 0.50 && Math.abs(diff) > 0 && normalizedLineItems.length > 0) {
+            const largest = normalizedLineItems.reduce((p, c) => (c.taxable_value > p.taxable_value ? c : p), normalizedLineItems[0]);
+            largest.igst_amount = round2(largest.igst_amount + diff);
+            largest.total_amount = round2(largest.taxable_value + largest.igst_amount);
+        }
+    } else {
+        const lineCgstSum = round2(normalizedLineItems.reduce((acc, it) => acc + it.cgst_amount, 0));
+        const diff = round2(totalCgst - lineCgstSum);
+        if (Math.abs(diff) <= 0.50 && Math.abs(diff) > 0 && normalizedLineItems.length > 0) {
+            const largest = normalizedLineItems.reduce((p, c) => (c.taxable_value > p.taxable_value ? c : p), normalizedLineItems[0]);
+            largest.cgst_amount = round2(largest.cgst_amount + diff);
+            largest.sgst_amount = round2(largest.sgst_amount + diff);
+            largest.total_amount = round2(largest.taxable_value + largest.cgst_amount + largest.sgst_amount);
+        }
+    }
+
+    // 7. Pure Accounting Math Calculation & Reconciliation (Law 4 & Law 5 - Strict Round Off <= 0.99)
+    let itemsTaxableSum = round2(normalizedLineItems.reduce((acc, it) => acc + (it.taxable_value || 0), 0));
+
+    // Task 2.4: Subtotal reconciliation within ±0.15 delta
+    const printedTaxableSubtotal = parseFloat(raw.printed_taxable_subtotal || 0);
+    if (printedTaxableSubtotal > 0 && Math.abs(itemsTaxableSum - printedTaxableSubtotal) <= 0.15 && Math.abs(itemsTaxableSum - printedTaxableSubtotal) > 0.0001 && normalizedLineItems.length > 0) {
+        const subDelta = round2(printedTaxableSubtotal - itemsTaxableSum);
+        const largest = normalizedLineItems.reduce((p, c) => (c.taxable_value > p.taxable_value ? c : p), normalizedLineItems[0]);
+        largest.taxable_value = round2(largest.taxable_value + subDelta);
+        largest.total_amount = round2(largest.taxable_value + largest.cgst_amount + largest.sgst_amount + largest.igst_amount);
+        itemsTaxableSum = round2(itemsTaxableSum + subDelta);
+    }
+    const totalTaxable = itemsTaxableSum;
+
+    const freightCharges = round2(parseFloat(raw.printed_freight_or_other_charges ?? raw.freight_charges ?? raw.freightCharges ?? raw.freight ?? 0));
     const calculatedTotalBeforeRoundOff = round2(itemsTaxableSum + totalCgst + totalSgst + totalIgst + freightCharges);
 
     const printedGrandTotal = parseFloat(raw.printed_grand_total ?? raw.grand_total ?? raw.totalAmount ?? 0);
@@ -1032,15 +1193,19 @@ function auditInvoiceData(raw = {}) {
     let grandTotal = 0;
     let roundOff = 0;
 
-    if (printedGrandTotal > 0 && Math.abs(printedGrandTotal - calculatedTotalBeforeRoundOff) <= 1.0) {
-        grandTotal = round2(printedGrandTotal);
-        roundOff = round2(grandTotal - calculatedTotalBeforeRoundOff);
-    } else if (printedGrandTotal > 0) {
-        // Never overwrite grand_total to a mismatched number that contradicts taxable + tax + round_off
-        grandTotal = round2(printedGrandTotal);
-        roundOff = round2(printedRoundOff);
+    if (printedGrandTotal > 0) {
+        const rawDiff = round2(printedGrandTotal - calculatedTotalBeforeRoundOff);
+        if (Math.abs(rawDiff) <= 0.99) {
+            // Difference is within ±0.99: legitimate fractional round-off
+            roundOff = rawDiff;
+            grandTotal = round2(printedGrandTotal);
+        } else {
+            // Difference > 0.99: Keep round_off strictly capped to fractional paisa
+            roundOff = (Math.abs(printedRoundOff) <= 0.99) ? round2(printedRoundOff) : 0.0;
+            grandTotal = round2(calculatedTotalBeforeRoundOff + roundOff);
+        }
     } else {
-        roundOff = round2(printedRoundOff);
+        roundOff = (Math.abs(printedRoundOff) <= 0.99) ? round2(printedRoundOff) : 0.0;
         grandTotal = round2(calculatedTotalBeforeRoundOff + roundOff);
     }
 
@@ -1049,15 +1214,20 @@ function auditInvoiceData(raw = {}) {
     let mathDiff = balanceDiff;
 
     let status = 'verified';
-    if (Math.abs(balanceDiff) <= 0.05) {
+    if (Math.abs(balanceDiff) <= 0.01) {
         mathDiff = 0.0;
-        status = 'verified';
+        if (printedGrandTotal > 0 && Math.abs(grandTotal - printedGrandTotal) > 0.05) {
+            status = 'math_error';
+            mathDiff = round2(grandTotal - printedGrandTotal);
+        } else {
+            status = 'verified';
+        }
     } else {
         status = 'math_error';
     }
 
-    // 6. Header Fields
-    const invNum = (raw.invoice_number || raw.invoiceNumber || '').trim();
+    // 7. Header Fields
+    let invNum = (raw.invoice_number || raw.invoiceNumber || raw.bill_number || raw.billNo || raw.supplier_ref || raw.reference || '').trim();
     const rawDate = raw.invoice_date || raw.invoiceDate || '';
     const invDateIso = parseIndianDateToISO(rawDate);
     const dueDateIso = (raw.due_date || raw.dueDate) ? parseIndianDateToISO(raw.due_date || raw.dueDate) : '';
@@ -1069,6 +1239,15 @@ function auditInvoiceData(raw = {}) {
     const supplierRef = (raw.supplier_ref || raw.supplierRef || '').trim();
     const vehicleNo = (raw.vehicle_no || raw.vehicleNumber || raw.vehicle_number || '').trim();
     const ewayBillNo = (raw.eway_bill_no || raw.ewayBillNo || '').trim();
+
+    if (!invNum) {
+        invNum = buyerOrderNo || supplierRef || '';
+    }
+    if (!invNum && (vendorName || grandTotal > 0)) {
+        const cleanDate = invDateIso ? invDateIso.replace(/-/g, '') : 'NODATE';
+        const cleanVendor = vendorName.replace(/[^a-zA-Z0-9]/g, '').slice(0, 6).toUpperCase() || 'BILL';
+        invNum = `${cleanVendor}-${cleanDate}-01`;
+    }
 
     if (!vendorName || !invNum || grandTotal <= 0) {
         if (status !== 'math_error') {
@@ -1118,8 +1297,12 @@ function auditInvoiceData(raw = {}) {
         printed_cgst_total: parseFloat(raw.printed_cgst_total ?? 0),
         printed_sgst_total: parseFloat(raw.printed_sgst_total ?? 0),
         printed_igst_total: parseFloat(raw.printed_igst_total ?? 0),
+        printed_cess_total: parseFloat(raw.printed_cess_total ?? 0),
+        printed_freight_or_other_charges: freightCharges,
         printed_round_off: parseFloat(raw.printed_round_off ?? 0),
         printed_grand_total: printedGrandTotal,
+        printed_zero_rated_taxable: parseFloat(raw.printed_zero_rated_taxable ?? 0),
+        printed_tax_slab_summary: Array.isArray(raw.printed_tax_slab_summary) ? raw.printed_tax_slab_summary : [],
 
         verification_state: status,
         math_difference: mathDiff,
@@ -1141,17 +1324,41 @@ function auditInvoiceData(raw = {}) {
     };
 }
 
-// Helper: Convert file buffer to Generative AI part
+const { execSync } = require('child_process');
+
+// Helper: Convert file buffer to Generative AI part (with auto-optimization for large image uploads)
 function fileToGenerativePart(filePath, mimeType) {
+    let finalPath = filePath;
+    try {
+        if (mimeType && mimeType.startsWith('image/') && fs.existsSync(filePath)) {
+            const stat = fs.statSync(filePath);
+            if (stat.size > 1.5 * 1024 * 1024) {
+                const optPath = path.join(path.dirname(filePath), `opt-${path.basename(filePath, path.extname(filePath))}.jpg`);
+                if (!fs.existsSync(optPath)) {
+                    const psScript = path.join(__dirname, 'resize_helper.ps1');
+                    if (fs.existsSync(psScript)) {
+                        execSync(`powershell -NoProfile -ExecutionPolicy Bypass -File "${psScript}" -SrcPath "${path.resolve(filePath)}" -DstPath "${path.resolve(optPath)}" -MaxWidth 1800`, { timeout: 10000 });
+                    }
+                }
+                if (fs.existsSync(optPath)) {
+                    finalPath = optPath;
+                    mimeType = 'image/jpeg';
+                }
+            }
+        }
+    } catch (e) {
+        finalPath = filePath;
+    }
+
     return {
         inlineData: {
-            data: Buffer.from(fs.readFileSync(filePath)).toString('base64'),
+            data: Buffer.from(fs.readFileSync(finalPath)).toString('base64'),
             mimeType
         }
     };
 }
 
-// Helper: Call Gemini AI with gemini-2.5-flash and retry mechanism (Task 1 & Task 2)
+// Helper: Call Gemini AI with precision vision model and auto-recovery retry mechanism (Task 1 & Task 2)
 async function processFileWithGemini(genAI, filePath, mimeType, res = null) {
     const imagePart = fileToGenerativePart(filePath, mimeType);
     const prompt = `
@@ -1174,7 +1381,7 @@ async function processFileWithGemini(genAI, filePath, mimeType, res = null) {
       "buyer_state": "State of the buyer / Place of supply (null if missing)",
       "buyer_address": "Delivery or billing address of the buyer (null if missing)",
 
-      "invoice_number": "Invoice, Tax Invoice, or Bill number",
+      "invoice_number": "Invoice, Tax Invoice, Bill, Cash Memo, or Document number (e.g. '2025100762', 'SSEPL-40655'). Look for labels like 'Invoice No', 'Invoice N :', 'Bill No', 'Inv #', 'Memo No', or voucher numbers printed at the top. Never leave empty if an invoice/bill number is printed on the document.",
       "invoice_date": "Invoice date parsed strictly from Indian format (DD-MM-YY or DD-MM-YYYY) into ISO YYYY-MM-DD",
       "due_date": "Payment due date in ISO YYYY-MM-DD format (null if not specified)",
       "payment_mode": "Payment mode (e.g. UPI, Cash, Bank Transfer, Cheque, Credit) (null if not specified)",
@@ -1185,6 +1392,7 @@ async function processFileWithGemini(genAI, filePath, mimeType, res = null) {
       "vehicle_no": "Vehicle or transport number (null if missing)",
       "eway_bill_no": "E-Way Bill number (null if missing)",
 
+      "last_serial_number": 36,
       "line_items": [
         {
           "sr_no": 1,
@@ -1193,7 +1401,9 @@ async function processFileWithGemini(genAI, filePath, mimeType, res = null) {
           "quantity": 1,
           "uom": "Unit of measurement string (e.g. \"Nos\", \"Box\", \"Pkt\", \"Kgs\", \"Pcs\" - default to \"Nos\" if blank)",
           "rate": 100.0,
+          "rate_incl_gst": null,
           "discount_percent": 0.0,
+          "discount_amount": 0.0,
           "taxable_value": 100.0,
           "gst_rate": 18,
           "cgst_amount": 9.0,
@@ -1207,8 +1417,20 @@ async function processFileWithGemini(genAI, filePath, mimeType, res = null) {
       "printed_cgst_total": 9.0,
       "printed_sgst_total": 9.0,
       "printed_igst_total": 0.0,
+      "printed_cess_total": 0.0,
+      "printed_freight_or_other_charges": 0.0,
       "printed_round_off": 0.0,
       "printed_grand_total": 118.0,
+      "printed_zero_rated_taxable": 0.0,
+      "printed_tax_slab_summary": [
+        {
+          "gst_rate": 18,
+          "taxable_value": 100.0,
+          "cgst": 9.0,
+          "sgst": 9.0,
+          "igst": 0.0
+        }
+      ],
 
       "total_taxable": 100.0,
       "total_cgst": 9.0,
@@ -1220,27 +1442,43 @@ async function processFileWithGemini(genAI, filePath, mimeType, res = null) {
     }
 
     STRICT BOOKKEEPER OCR RULES:
-    1. STRICT SEQUENTIAL ROW EXTRACTION (Sr 1 to Sr N):
-       - CRITICAL: Scan the line-item table starting immediately below the column header row (e.g., "Sr | Goods & Service Description | HSN | Quantity | Rate | Taxable | GST | Total").
+    1. UNIVERSAL ROW EXTRACTION & TABLE COMPLETION GUARANTEE:
+       - Look at the "SL No." / "Sr" column on the far left. Record "last_serial_number" as the highest integer printed in this column before the Sub-Total / Amount Before Tax row.
+       - Strictly extract EVERY SINGLE row from SL No. 1 to "last_serial_number".
+       - "line_items.length" MUST exactly equal "last_serial_number". Do NOT skip, summarize, or truncate rows!
+       - Consecutive rows with the same item name (e.g. Haldi Powder with different quantities) are SEPARATE rows; never merge or skip them.
        - Do NOT skip Row 1 (Sr 1), even if it is flush against the header border or has a small amount.
-       - Extract the "sr_no" for every row.
-       - Before returning JSON, verify that line_items.length matches the final Sr number printed in the table (e.g., if Sr goes from 1 to 8, line_items MUST contain all 8 items) and that the sum of line_items[].taxable_value equals the printed Sub-Total.
-    2. PRESERVE PRINTED SUMMARY TOTALS SEPARATELY:
-       - Extract "printed_taxable_subtotal", "printed_cgst_total", "printed_sgst_total", "printed_igst_total", "printed_round_off", and "printed_grand_total" directly from the bottom summary box/table of the invoice.
-    3. Indian Date Parsing Rule: Indian invoices print dates as DD-MM-YYYY or DD-MM-YY (e.g. 10-01-25 is January 10th 2025, NOT October 1st). Parse strictly into ISO YYYY-MM-DD.
-    4. Full Line Items Array: Extract EVERY single line item present in the invoice table without summarizing, grouping, or truncating.
-    5. uom: If unit is not explicitly written on the item line, default to "Nos".
-    6. Visual Primacy: Extract the EXACT numeric values printed on the invoice for Rate and Taxable Value. DO NOT guess or alter numbers. If an item says '10.00', extract 10.00.
-    7. Reverse Charge: Must be strictly "Yes" or "No".
-    8. Null safety: If a text field is absent from the document, output null for text and 0 for numeric fields. Do NOT refuse to extract the document.
-    9. Grand Total Validation: Ensure numeric amounts are precise numbers without currency symbols.
+    2. UNIVERSAL RATE DISAMBIGUATION (RATE Incl. GST vs RATE Excl. GST):
+       - If the table has both "RATE (Including GST)" and "RATE (Excl. GST)" columns, ALWAYS extract "rate" from the "RATE (Excl. GST)" column, "rate_incl_gst" from the "RATE (Including GST)" column, "quantity" from the "QUANTITY" column, and "taxable_value" from the "NET AMOUNT" / "TAXABLE" column (before tax).
+       - Verify for every single row that round(quantity * rate - discount) ≈ taxable_value. Never alter "rate" to match a misread "quantity" — instead, re-read the "QUANTITY" and "RATE (Excl. GST)" digits directly from that row.
+    3. BLANK GST COLUMN === 0% (NEVER DEFAULT TO 5% OR 18%):
+       - CRITICAL: If the "GST %" / "Tax %" / "GST @" cell for a line item is BLANK, empty, dash ("-"), or says "Nil" / "Exempt" (commonly pulses, dal, grains, unbranded food), you MUST output "gst_rate": 0. NEVER guess or copy 5% or 18% from rows above or below when the GST cell is blank!
+    4. PRESERVE PRINTED SUMMARY TOTALS & TAX SLAB BREAKDOWN SEPARATELY:
+       - Extract "printed_taxable_subtotal", "printed_cgst_total", "printed_sgst_total", "printed_igst_total", "printed_cess_total", "printed_freight_or_other_charges", "printed_round_off", "printed_grand_total", and "printed_zero_rated_taxable" directly from the bottom summary box and GST slab breakdown table of the invoice.
+       - If the invoice includes a bottom GST slab summary table (grouped by GST % e.g. 0%, 5%, 12%, 18%), extract each slab row into "printed_tax_slab_summary" array as { "gst_rate": number, "taxable_value": number, "cgst": number, "sgst": number, "igst": number }. If absent, output an empty array [].
+    5. Indian Date Parsing Rule: Indian invoices print dates as DD-MM-YYYY, DD-MM-YY, or D-Mon-YY (e.g. 2-Sep-25 is September 2nd 2025, 10-01-25 is January 10th 2025). Parse strictly into ISO YYYY-MM-DD.
+    6. Full Line Items Array: Extract EVERY single line item present in the invoice table without summarizing, grouping, or truncating.
+    7. uom: Unit of measurement string (e.g. "KG", "PKT", "JAR", "TIN", "CARTOON", "PC", "Nos" - default to "Nos" if blank).
+    8. Visual Primacy: Extract the EXACT numeric values printed on the invoice for Rate (Excl. GST) and Taxable Value (NET AMOUNT). DO NOT guess or alter numbers.
+    9. Reverse Charge: Must be strictly "Yes" or "No".
+    10. Null safety: If a text field is absent from the document, output null for text and 0 for numeric fields. Do NOT refuse to extract the document.
+    11. Grand Total Validation: Ensure numeric amounts are precise numbers without currency symbols.
     `;
 
-    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
-    const maxAttempts = 3;
+    const modelCandidates = ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite"];
+    const maxAttempts = 6;
     let lastError = null;
+    let modelIdx = 0;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        const currentModelName = modelCandidates[modelIdx % modelCandidates.length];
+        const model = genAI.getGenerativeModel({
+            model: currentModelName,
+            generationConfig: {
+                responseMimeType: "application/json",
+                temperature: 0.1
+            }
+        });
         try {
             const result = await model.generateContent([prompt, imagePart]);
             let responseText = result.response.text();
@@ -1248,23 +1486,49 @@ async function processFileWithGemini(genAI, filePath, mimeType, res = null) {
             try {
                 parsedData = JSON.parse(responseText);
             } catch (jsonErr) {
-                // If partial JSON is returned, sanitize it and return it instead of throwing a 500 error
                 const sanitized = responseText.replace(/```json/gi, '').replace(/```/g, '').trim();
                 parsedData = JSON.parse(sanitized);
             }
 
-            // Auto-Recovery Retry When a Table Row is Missed
+            // Task 2.5: Targeted AI Auto-Recovery Retry When Table Rows are Missed or Taxable Sum Mismatches
             if (parsedData) {
                 const lineItems = Array.isArray(parsedData.line_items) ? parsedData.line_items : [];
-                const printedSubTotal = Number(parsedData.printed_taxable_subtotal || parsedData.total_taxable || 0);
+                let printedSubTotal = Number(parsedData.printed_taxable_subtotal || parsedData.total_taxable || 0);
+                if (printedSubTotal <= 0 && Array.isArray(parsedData.printed_tax_slab_summary) && parsedData.printed_tax_slab_summary.length > 0) {
+                    printedSubTotal = round2(parsedData.printed_tax_slab_summary.reduce((s, slab) => s + Number(slab.taxable_value || 0), 0));
+                }
                 const itemsTaxableSum = round2(lineItems.reduce((s, i) => s + Number(i.taxable_value || (i.quantity * i.rate) || 0), 0));
 
-                if (printedSubTotal > 0 && Math.abs(itemsTaxableSum - printedSubTotal) > 1.0) {
-                    console.warn(`[Gemini AI] Taxable sum mismatch detected (items: ${itemsTaxableSum}, printed subtotal: ${printedSubTotal}). Attempting auto-recovery retry...`);
+                const srNumbers = lineItems.map(i => Number(i.sr_no)).filter(n => !isNaN(n) && n > 0);
+                const maxSr = Math.max(parsedData.last_serial_number || 0, srNumbers.length > 0 ? Math.max(...srNumbers) : 0, lineItems.length);
+                const hasMissingRow = maxSr > lineItems.length;
+
+                if ((printedSubTotal > 0 && Math.abs(itemsTaxableSum - printedSubTotal) > 1.0) || hasMissingRow) {
+                    console.warn(`[Gemini AI] Taxable sum mismatch or missing row detected (items: ${itemsTaxableSum}, printed subtotal: ${printedSubTotal}, count: ${lineItems.length}/${maxSr}). Attempting targeted auto-recovery retry...`);
                     try {
                         const diff = round2(printedSubTotal - itemsTaxableSum);
-                        const retryPrompt = `Your previous extraction summed to ${itemsTaxableSum}, but the printed Sub-Total on the invoice is ${printedSubTotal} (difference: ${diff}). You missed a row (check Row 1 right under the table header). Return the complete JSON with ALL rows included.`;
-                        const retryResult = await model.generateContent([
+                        const missingSerials = [];
+                        for (let s = 1; s <= maxSr; s++) {
+                            if (!srNumbers.includes(s)) missingSerials.push(s);
+                        }
+                        const missingNote = missingSerials.length > 0 ? `Specifically, rows with SL No ${missingSerials.join(', ')} were missing from your previous extraction.` : '';
+
+                        const retryPrompt = `CRITICAL AUTO-RECOVERY RETRY (2nd Pass):
+Your previous extraction returned ${lineItems.length} line items summing to ₹${itemsTaxableSum.toFixed(2)}, but the printed Sub-Total (Amount Before Tax / Net Total) on the invoice is ₹${printedSubTotal.toFixed(2)} (discrepancy: ${diff > 0 ? '+' : ''}₹${diff.toFixed(2)}).
+${missingNote}
+The highest serial number printed in the item table before the Sub-Total is ${maxSr}.
+Extract ALL rows from SL No 1 to ${maxSr} without skipping any row.
+Ensure EVERY single row has its exact printed SL No, quantity, Rate (Excl. GST), and Net Amount (Taxable Value), strictly matching the printed Sub-Total ₹${printedSubTotal.toFixed(2)}.`;
+
+                        const retryModel = genAI.getGenerativeModel({
+                            model: currentModelName,
+                            generationConfig: {
+                                responseMimeType: "application/json",
+                                temperature: 0.1
+                            }
+                        });
+
+                        const retryResult = await retryModel.generateContent([
                             prompt + "\n\nCRITICAL AUTO-RECOVERY RETRY INSTRUCTION:\n" + retryPrompt,
                             imagePart
                         ]);
@@ -1276,11 +1540,21 @@ async function processFileWithGemini(genAI, filePath, mimeType, res = null) {
                             const clean = retryText.replace(/```json/gi, '').replace(/```/g, '').trim();
                             retryJSON = JSON.parse(clean);
                         }
-                        if (retryJSON && Array.isArray(retryJSON.line_items)) {
+                        if (retryJSON && Array.isArray(retryJSON.line_items) && retryJSON.line_items.length > 0) {
                             const retryItemsSum = round2(retryJSON.line_items.reduce((s, i) => s + Number(i.taxable_value || (i.quantity * i.rate) || 0), 0));
                             console.log(`[Gemini AI] Auto-recovery retry completed: items count=${retryJSON.line_items.length}, sum=${retryItemsSum}`);
-                            if (Math.abs(retryItemsSum - printedSubTotal) <= Math.abs(itemsTaxableSum - printedSubTotal)) {
+                            const retryDiscrepancy = Math.abs(retryItemsSum - printedSubTotal);
+                            const prevDiscrepancy = Math.abs(itemsTaxableSum - printedSubTotal);
+                            if (retryDiscrepancy <= prevDiscrepancy || retryDiscrepancy <= 1.0) {
                                 parsedData = retryJSON;
+                            } else if (retryJSON.line_items.length < maxSr) {
+                                // Merge missing rows
+                                const existingSrs = new Set(parsedData.line_items.map(it => Number(it.sr_no)));
+                                const newItems = retryJSON.line_items.filter(it => !existingSrs.has(Number(it.sr_no)));
+                                if (newItems.length > 0) {
+                                    console.log(`[Gemini AI] Merged ${newItems.length} missing rows from retry.`);
+                                    parsedData.line_items = [...parsedData.line_items, ...newItems].sort((a, b) => Number(a.sr_no) - Number(b.sr_no));
+                                }
                             }
                         }
                     } catch (retryErr) {
@@ -1292,18 +1566,42 @@ async function processFileWithGemini(genAI, filePath, mimeType, res = null) {
             return parsedData;
         } catch (err) {
             lastError = err;
-            console.warn(`[Gemini AI] Attempt ${attempt} failed:`, err.message);
+            console.warn(`[Gemini AI] Attempt ${attempt} with ${currentModelName} failed:`, err.message);
 
+            const is429 = err.status === 429 || (err.message && (err.message.includes('429') || err.message.includes('quota') || err.message.includes('Quota')));
             const is503 = err.status === 503 ||
                 (err.message && (err.message.includes('503') || err.message.includes('Service Unavailable') || err.message.includes('overloaded') || err.message.includes('ResourceExhausted')));
+            const isNetworkError = err.message && (
+                err.message.includes('fetch failed') ||
+                err.message.includes('ECONNRESET') ||
+                err.message.includes('ETIMEDOUT') ||
+                err.message.includes('network') ||
+                err.message.includes('ENOTFOUND')
+            );
 
-            if (is503 && attempt < maxAttempts) {
-                console.log(`[Gemini AI] 503 / Service Unavailable encountered. Waiting 2 seconds before retry (attempt ${attempt + 1}/${maxAttempts})...`);
-                await new Promise(r => setTimeout(r, 2000));
+            if ((is429 || is503 || isNetworkError) && attempt < maxAttempts) {
+                if (is429) {
+                    modelIdx++;
+                    console.log(`[Gemini AI] Quota 429 encountered on ${currentModelName}. Switching to fallback model: ${modelCandidates[modelIdx % modelCandidates.length]}...`);
+                    await new Promise(r => setTimeout(r, 1000));
+                } else if (is503) {
+                    const waitTime = 2000;
+                    if (attempt % 2 === 0) {
+                        modelIdx++;
+                        console.log(`[Gemini AI] 503 / Service Unavailable persists on ${currentModelName}. Switching to fallback model: ${modelCandidates[modelIdx % modelCandidates.length]}...`);
+                    } else {
+                        console.log(`[Gemini AI] 503 / Service Unavailable encountered on ${currentModelName}. Retrying in ${waitTime / 1000}s before fallback...`);
+                    }
+                    await new Promise(r => setTimeout(r, waitTime));
+                } else if (isNetworkError) {
+                    const waitTime = attempt * 2000;
+                    console.log(`[Gemini AI] Network glitch (${err.message.slice(0, 40)}) encountered. Retrying in ${waitTime / 1000}s (attempt ${attempt + 1}/${maxAttempts})...`);
+                    await new Promise(r => setTimeout(r, waitTime));
+                }
                 continue;
             }
 
-            if (!is503) {
+            if (!is429 && !is503 && !isNetworkError) {
                 break;
             }
         }
@@ -1422,6 +1720,7 @@ app.post('/api/extract-invoice', ClerkExpressRequireAuth({}), extractLimiter, up
                         printed_igst_total: audited.printed_igst_total,
                         printed_round_off: audited.printed_round_off,
                         printed_grand_total: audited.printed_grand_total,
+                        printed_zero_rated_taxable: audited.printed_zero_rated_taxable,
 
                         // Frontend aliases for full seamless UI reactivity
                         vendorName: audited.vendor_name,

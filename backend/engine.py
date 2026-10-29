@@ -351,6 +351,7 @@ def extract_invoice_data_with_gemini(file_path: str, api_key: Optional[str] = No
     - printed_igst_total (number): IGST total printed on summary
     - printed_round_off (number): Round off printed on summary
     - printed_grand_total (number): Final payable grand total printed on summary
+    - printed_zero_rated_taxable (number): Taxable value of 0% / Nil-rated goods printed on breakdown
     - total_taxable (number): Total taxable value before taxes
     - total_cgst (number): Total Central GST
     - total_sgst (number): Total State GST
@@ -360,15 +361,20 @@ def extract_invoice_data_with_gemini(file_path: str, api_key: Optional[str] = No
     - grand_total (number): Final payable grand total amount
 
     Strict Rules:
-    1. STRICT SEQUENTIAL ROW EXTRACTION (Sr 1 to Sr N):
+    1. STRICT SEQUENTIAL ROW EXTRACTION (SL No. / Sr 1 to N):
        - Scan the line-item table starting immediately below the column header row.
        - Do NOT skip Row 1 (Sr 1), even if flush against header border.
-       - Verify line_items.length matches the final Sr number and sum of line_items[].taxable_value equals printed Sub-Total.
-    2. PRESERVE PRINTED SUMMARY TOTALS SEPARATELY:
-       - Extract printed_taxable_subtotal, printed_cgst_total, printed_sgst_total, printed_igst_total, printed_round_off, and printed_grand_total directly from invoice summary.
-    3. Parse Indian dates (DD-MM-YYYY or DD-MM-YY) strictly to ISO (YYYY-MM-DD).
-    4. uom defaults to "Nos" if not explicitly specified.
-    5. Ensure numerical amounts are accurate numbers without currency symbols.
+       - Ensure not a single row is skipped. Verify line_items.length matches the final Sr number and sum of line_items[].taxable_value equals printed Sub-Total.
+    2. DUAL RATE COLUMNS (RATE Incl. GST vs RATE Excl. GST):
+       - If both columns exist, ALWAYS extract rate from "RATE (Excl. GST)", quantity from "QUANTITY", and taxable_value from "NET AMOUNT" / "TAXABLE".
+       - Verify round(quantity * rate) ≈ taxable_value. Never alter rate to match a misread quantity.
+    3. BLANK GST COLUMN === 0% (NEVER DEFAULT TO 5% OR 18%):
+       - If GST % is blank, empty, dash, Nil, or Exempt, output gst_rate: 0. NEVER copy 5% or 18% from nearby rows!
+    4. PRESERVE PRINTED SUMMARY TOTALS & TAX SLAB BREAKDOWN SEPARATELY:
+       - Extract printed_taxable_subtotal, printed_cgst_total, printed_sgst_total, printed_igst_total, printed_round_off, printed_grand_total, and printed_zero_rated_taxable directly from invoice summary.
+    5. Parse Indian dates (DD-MM-YYYY or DD-MM-YY) strictly to ISO (YYYY-MM-DD).
+    6. uom defaults to "Nos" if not explicitly specified.
+    7. Ensure numerical amounts are accurate numbers without currency symbols.
     """
 
     # Schema definition for JSON response
@@ -427,6 +433,7 @@ def extract_invoice_data_with_gemini(file_path: str, api_key: Optional[str] = No
             "printed_igst_total": {"type": "NUMBER"},
             "printed_round_off": {"type": "NUMBER"},
             "printed_grand_total": {"type": "NUMBER"},
+            "printed_zero_rated_taxable": {"type": "NUMBER"},
             "total_taxable": {"type": "NUMBER"},
             "total_cgst": {"type": "NUMBER"},
             "total_sgst": {"type": "NUMBER"},

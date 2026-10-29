@@ -1,5 +1,48 @@
+# Environment and sensitive credential files
 .env
-node_modules/.
+.env.*
+.env.local
+.env.development
+.env.production
+*.env
+*.env.*
+**/.env
+**/.env.*
+frontend/.env*
+backend/.env*
+
+# Database files
+*.sqlite
+*.sqlite3
+*.db
+database.sqlite
+backend/database.sqlite
+
+# Node & Frontend dependencies and build caches
+node_modules/
+frontend/node_modules/
+backend/node_modules/
+.next/
+dist/
+out/
+build/
+
+# Python caches
 __pycache__/
 *.py[cod]
+
+# Uploads, test outputs, and caches
+uploads/
+backend/uploads/
+backend/exports/
 backend/invoices/Screen Recordings/
+backend/invoices/Photos/Photos/opt-*.jpg
+backend/invoices/test_opt.jpg
+backend/scratch_*.txt
+*.log
+
+# System & IDE files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
