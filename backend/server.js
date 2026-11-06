@@ -104,6 +104,8 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Serve static frontend files from 'public' directory
 app.use(express.static(path.join(__dirname, '../frontend/dist')));
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
 
 // Ensure uploads directory exists
 const uploadsDir = path.join(__dirname, 'uploads');
@@ -925,43 +927,32 @@ function findSubsetSum(items, target, tolerance = 0.05) {
 // Utility: Audit math check & complete bookkeeper schema normalization
 function auditInvoiceData(raw = {}) {
     raw = raw || {};
+    const round2 = (num) => Math.round((num + Number.EPSILON) * 100) / 100;
 
     // 1. Supplier Fields
     const vendorName = (raw.vendor_name || raw.supplier_name || raw.vendorName || '').trim();
     const vendorGstin = (raw.vendor_gstin || raw.supplier_gstin || raw.gstin || '').trim().toUpperCase();
     const vendorAddress = (raw.vendor_address || raw.supplier_address || raw.supplierAddress || '').trim();
-    const derivedVendorState = getStateFromGstin(vendorGstin, raw.vendor_state || raw.supplier_state || raw.place_of_supply || raw.placeOfSupply || 'Delhi');
-    const vendorState = (raw.vendor_state || raw.supplier_state || derivedVendorState || 'Delhi').trim();
+    const vendorState = (raw.vendor_state || raw.supplier_state || 'Delhi').trim();
     const rawPin = (raw.vendor_pincode || raw.pincode || '').toString().trim();
     let vendorPincode = '';
-    if (/^\d{6}$/.test(rawPin)) {
-        vendorPincode = rawPin;
-    } else {
-        const pinMatch = vendorAddress.match(/\b\d{6}\b/);
-        vendorPincode = pinMatch ? pinMatch[0] : '';
-    }
-    const vendorPhone = (raw.vendor_phone || raw.phone || '').trim();
-    const bankName = (raw.bank_name || raw.bankName || '').trim();
-    const accountNumber = (raw.account_number || raw.accountNumber || '').trim();
-    const ifscCode = (raw.ifsc_code || raw.ifscCode || '').trim();
-    const upiId = (raw.upi_id || raw.upiId || '').trim();
+    if (/^\d{6}$/.test(rawPin)) { vendorPincode = rawPin; }
+    else { const pinMatch = vendorAddress.match(/\b\d{6}\b/); vendorPincode = pinMatch ? pinMatch[0] : ''; }
 
     // 2. Buyer Fields
     const buyerName = (raw.buyer_name || raw.buyerName || '').trim();
     const buyerGstin = (raw.buyer_gstin || raw.buyerGstin || '').trim().toUpperCase();
-    const derivedBuyerState = getStateFromGstin(buyerGstin, raw.buyer_state || raw.buyerState || '');
-    const buyerState = (raw.buyer_state || raw.buyerState || derivedBuyerState || '').trim();
-    const buyerAddress = (raw.buyer_address || raw.buyerAddress || '').trim();
+    const buyerState = (raw.buyer_state || raw.buyerState || '').trim();
 
-    // 3. Tax Classification (Intra-State vs Inter-State)
-    const rawPrintedCgst = parseFloat(raw.printed_cgst_total ?? raw.total_cgst ?? raw.taxBreakdown?.cgst ?? raw.cgst_amount ?? 0);
-    const rawPrintedSgst = parseFloat(raw.printed_sgst_total ?? raw.total_sgst ?? raw.taxBreakdown?.sgst ?? raw.sgst_amount ?? 0);
-    const rawPrintedIgst = parseFloat(raw.printed_igst_total ?? raw.total_igst ?? raw.taxBreakdown?.igst ?? raw.igst_amount ?? 0);
+    // 3. Tax Classification
+    const rawPrintedCgst = parseFloat(raw.printed_cgst_total ?? raw.total_cgst ?? 0);
+    const rawPrintedSgst = parseFloat(raw.printed_sgst_total ?? raw.total_sgst ?? 0);
+    const rawPrintedIgst = parseFloat(raw.printed_igst_total ?? raw.total_igst ?? 0);
     const hasCgstSgst = (rawPrintedCgst > 0 || rawPrintedSgst > 0);
     const statesDiffer = Boolean(buyerState && vendorState && vendorState.toLowerCase() !== buyerState.toLowerCase());
     const isInterState = (rawPrintedIgst > 0 && !hasCgstSgst) || (statesDiffer && !hasCgstSgst && rawPrintedIgst > 0);
 
-    // 4. Line Items Normalization (Law 1 & Law 2)
+    // 4. Line Items Normalization & Robust Rate Checking
     const rawItems = raw.line_items || raw.items || [];
     const VALID_GST_SLABS = [0, 0.25, 3, 5, 12, 18, 28];
 
@@ -971,68 +962,33 @@ function auditInvoiceData(raw = {}) {
         const hsn = String(item.hsn_code ?? item.hsn_sac ?? item.hsn ?? '').trim();
         let qty = Number(item.quantity ?? item.qty ?? 1);
         const uom = String(item.uom || item.unit || 'Nos').trim() || 'Nos';
-        const rawRate = Number(item.rate ?? 0);
-        const rawRateIncl = Number(item.rate_incl_gst ?? item.rate_inclusive ?? item.rateInclTax ?? 0);
+        let rate = Number(item.rate ?? 0);
         const disc = Number(item.discount_percent ?? item.discount ?? 0);
         const discAmt = Number(item.discount_amount ?? item.discountAmount ?? 0);
         let tv = Number(item.taxable_value ?? item.taxableValue ?? item.net_amount ?? item.netAmount ?? 0);
-        let rate = rawRate;
 
-        // Dual-rate implied GST calculation (Task 2.3)
-        let impliedGst = null;
-        if (rawRateIncl > 0 && rate > 0) {
-            if (Math.abs(rawRateIncl - rate) <= 0.05) {
-                impliedGst = 0;
-            } else if (rawRateIncl > rate) {
-                const rawDiffPct = ((rawRateIncl - rate) / rate) * 100;
-                impliedGst = [5, 12, 18, 28].reduce((prev, curr) => Math.abs(curr - rawDiffPct) < Math.abs(prev - rawDiffPct) ? curr : prev);
-            }
-        }
-
-        // GST rate parsing (Task 2.2: Blank/Nil/Exempt = 0%, NEVER guess or default to 5% or 18%)
-        const rawGstRate = item.gst_rate ?? item.gstRate ?? item.tax_rate ?? item.taxRate;
-        const rawGstStr = String(rawGstRate ?? '').trim().toLowerCase();
+        const rawGstStr = String(item.gst_rate ?? item.gstRate ?? item.tax_rate ?? '').trim().toLowerCase();
         let gstRate = 0;
-        const isBlankOrExempt = (rawGstRate === undefined || rawGstRate === null || rawGstStr === '' || rawGstStr === '-' || rawGstStr === 'nil' || rawGstStr === 'exempt' || rawGstStr === '0%');
+        const isBlankOrExempt = (rawGstStr === '' || rawGstStr === '-' || rawGstStr === 'nil' || rawGstStr === 'exempt' || rawGstStr === '0%');
         if (!isBlankOrExempt) {
             gstRate = Number(rawGstStr.replace(/[^0-9.]/g, ''));
             if (isNaN(gstRate)) gstRate = 0;
-        }
-
-        if (gstRate === 0 && impliedGst !== null && impliedGst > 0) {
-            gstRate = impliedGst;
-        } else if (gstRate === 0 && !isBlankOrExempt && (Number(item.cgst_amount) > 0 || Number(item.sgst_amount) > 0 || Number(item.igst_amount) > 0) && tv > 0) {
-            const itemTax = Number(item.cgst_amount || 0) + Number(item.sgst_amount || 0) + Number(item.igst_amount || 0);
-            gstRate = Math.round((itemTax / tv) * 100);
         }
 
         if (!VALID_GST_SLABS.includes(gstRate)) {
             gstRate = VALID_GST_SLABS.reduce((prev, curr) => Math.abs(curr - gstRate) < Math.abs(prev - gstRate) ? curr : prev);
         }
 
-        // Rate, Quantity & Taxable Value Triangle Check
+        // RESTORED: Inclusive Rate vs Exclusive Rate Triangle Check
         if (rate <= 0 && tv > 0 && qty > 0) {
             rate = round2((tv + discAmt) / (qty * (1 - disc / 100)));
         }
-
         const expectedTv = round2(qty * rate * (1 - disc / 100) - discAmt);
         if (tv > 0 && rate > 0) {
-            if (Math.abs(expectedTv - tv) <= 0.15) {
-                // Trust printed taxable_value (NET AMOUNT) within 15 paise
-            } else {
-                // Discrepancy > 0.15: Check if rate was entered as inclusive rate (gross rate)
+            if (Math.abs(expectedTv - tv) > 0.15) {
+                // If expected doesn't match printed, check if vendor baked GST into the rate
                 if (gstRate > 0 && Math.abs(round2(qty * (rate / (1 + gstRate / 100)) * (1 - disc / 100) - discAmt) - tv) <= 0.15) {
                     rate = round2(rate / (1 + gstRate / 100));
-                } else {
-                    // Check if quantity was misread and ratio = tv / effRate is near integer
-                    const effRate = rate * (1 - disc / 100);
-                    if (effRate > 0) {
-                        const ratio = (tv + discAmt) / effRate;
-                        const roundedQty = Math.round(ratio);
-                        if (roundedQty > 0 && Math.abs(ratio - roundedQty) < 0.05) {
-                            qty = roundedQty;
-                        }
-                    }
                 }
             }
         } else if (tv <= 0 && qty > 0 && rate > 0) {
@@ -1040,287 +996,87 @@ function auditInvoiceData(raw = {}) {
         }
 
         const itemTaxTotal = round2(tv * (gstRate / 100));
-        let cgstAmt = 0;
-        let sgstAmt = 0;
-        let igstAmt = 0;
-
-        if (isInterState) {
-            igstAmt = itemTaxTotal;
-        } else {
-            cgstAmt = round2(itemTaxTotal / 2);
-            sgstAmt = round2(itemTaxTotal / 2);
-        }
-
-        const totAmt = round2(tv + cgstAmt + sgstAmt + igstAmt);
+        let cgstAmt = 0, sgstAmt = 0, igstAmt = 0;
+        if (isInterState) { igstAmt = itemTaxTotal; }
+        else { cgstAmt = round2(itemTaxTotal / 2); sgstAmt = round2(itemTaxTotal / 2); }
 
         return {
-            sr_no: srNo,
-            description: desc,
-            hsn_code: hsn,
-            hsn_sac: hsn,
-            quantity: qty,
-            uom: uom,
-            unit: uom,
-            rate: rate,
-            rate_incl_gst: rawRateIncl > 0 ? rawRateIncl : null,
-            discount_percent: disc,
-            discount_amount: discAmt,
-            taxable_value: tv,
-            gst_rate: Number(gstRate),
-            cgst_amount: cgstAmt,
-            sgst_amount: sgstAmt,
-            igst_amount: igstAmt,
-            total_amount: totAmt
+            sr_no: srNo, description: desc, hsn_code: hsn, quantity: qty, uom: uom, rate: rate,
+            discount_percent: disc, discount_amount: discAmt, taxable_value: tv, gst_rate: gstRate,
+            cgst_amount: cgstAmt, sgst_amount: sgstAmt, igst_amount: igstAmt,
+            total_amount: round2(tv + cgstAmt + sgstAmt + igstAmt)
         };
     });
 
-    // 5. Universal Tax Reconciliation with Slab Cross-Verification (Law 3 - ZERO hardcoding)
-    const printedCgst = parseFloat(raw.printed_cgst_total ?? raw.total_cgst ?? 0);
-    const printedSgst = parseFloat(raw.printed_sgst_total ?? raw.total_sgst ?? 0);
-    const printedIgst = parseFloat(raw.printed_igst_total ?? raw.total_igst ?? 0);
-    const printedTotalTax = round2(printedCgst + printedSgst + printedIgst);
-
-    // Cross-check with printed_tax_slab_summary if provided
-    const slabSummary = Array.isArray(raw.printed_tax_slab_summary) ? raw.printed_tax_slab_summary : [];
-    if (slabSummary.length > 0) {
-        slabSummary.forEach(slab => {
-            const sRate = Number(slab.gst_rate ?? 0);
-            const sTaxable = round2(parseFloat(slab.taxable_value ?? 0));
-            if (sTaxable > 0) {
-                const currentMatchingItems = normalizedLineItems.filter(it => it.gst_rate === sRate);
-                const currentSum = round2(currentMatchingItems.reduce((acc, it) => acc + it.taxable_value, 0));
-                if (sRate === 0 && Math.abs(currentSum - sTaxable) > 1.00 && currentSum < sTaxable) {
-                    // Some 0% exempt items were misclassified into higher tax slabs
-                    const missingTaxable = round2(sTaxable - currentSum);
-                    const nonZeroItems = normalizedLineItems.filter(it => it.gst_rate > 0);
-                    const subset = findSubsetSum(nonZeroItems, missingTaxable);
-                    if (subset && subset.length > 0) {
-                        subset.forEach(it => {
-                            it.gst_rate = 0;
-                            it.cgst_amount = 0;
-                            it.sgst_amount = 0;
-                            it.igst_amount = 0;
-                            it.total_amount = it.taxable_value;
-                        });
-                    }
-                }
-            }
-        });
-    }
-
-    // Secondary universal check: if line-item taxes exceed printed tax breakdown by > ₹1.00
+    // 5. Multi-Slab & Tolerance
+    const uniqueSlabs = new Set(normalizedLineItems.map(it => it.gst_rate).filter(r => r > 0));
+    const taxTolerance = uniqueSlabs.size > 1 ? 2.50 : 0.99;
     let currentExpectedTax = round2(normalizedLineItems.reduce((acc, it) => acc + (it.taxable_value * (it.gst_rate / 100)), 0));
-    if (printedTotalTax > 0 && (currentExpectedTax - printedTotalTax) > 1.00) {
-        const taxDiff = round2(currentExpectedTax - printedTotalTax);
-        const candidateItems = normalizedLineItems.filter(it => {
-            const rawItem = rawItems[it.sr_no - 1] || {};
-            const rGst = rawItem.gst_rate ?? rawItem.gstRate ?? rawItem.tax_rate ?? '';
-            return rGst === '' || rGst === 0 || rGst === '0' || rGst === '-' || rGst === '0%' || rawItem.cgst_amount === 0;
-        });
-        if (candidateItems.length > 0) {
-            const candSum = round2(candidateItems.reduce((acc, it) => acc + it.taxable_value, 0));
-            const printedZero = parseFloat(raw.printed_zero_rated_taxable ?? 0);
-            if ((printedZero > 0 && Math.abs(candSum - printedZero) <= 5.00) || Math.abs(round2(candSum * 0.05) - taxDiff) <= 1.00) {
-                candidateItems.forEach(it => {
-                    it.gst_rate = 0;
-                    it.cgst_amount = 0;
-                    it.sgst_amount = 0;
-                    it.igst_amount = 0;
-                    it.total_amount = it.taxable_value;
-                });
-                currentExpectedTax = round2(normalizedLineItems.reduce((acc, it) => acc + (it.taxable_value * (it.gst_rate / 100)), 0));
-            }
-        }
-    }
 
-    // 6. Tax Totals & Deviation Healing (<= ₹0.50)
-    let totalCgst = 0;
-    let totalSgst = 0;
-    let totalIgst = 0;
-
+    // 6. Tax Totals Healing
+    let totalCgst = 0, totalSgst = 0, totalIgst = 0;
     if (isInterState) {
-        totalIgst = (printedIgst > 0 && Math.abs(printedIgst - currentExpectedTax) <= 0.50) ? printedIgst : currentExpectedTax;
+        totalIgst = (rawPrintedIgst > 0 && Math.abs(rawPrintedIgst - currentExpectedTax) <= taxTolerance) ? rawPrintedIgst : currentExpectedTax;
     } else {
-        if (printedCgst > 0 && printedSgst > 0 && Math.abs((printedCgst + printedSgst) - currentExpectedTax) <= 0.50) {
-            totalCgst = printedCgst;
-            totalSgst = printedSgst;
+        if (rawPrintedCgst > 0 && rawPrintedSgst > 0 && Math.abs((rawPrintedCgst + rawPrintedSgst) - currentExpectedTax) <= taxTolerance) {
+            totalCgst = rawPrintedCgst; totalSgst = rawPrintedSgst;
         } else {
-            totalCgst = round2(currentExpectedTax / 2);
-            totalSgst = round2(currentExpectedTax / 2);
+            totalCgst = round2(currentExpectedTax / 2); totalSgst = round2(currentExpectedTax / 2);
         }
     }
 
-    // Align line-item taxes with locked totals to avoid 1-paisa rounding drifts
-    if (isInterState) {
-        const lineIgstSum = round2(normalizedLineItems.reduce((acc, it) => acc + it.igst_amount, 0));
-        const diff = round2(totalIgst - lineIgstSum);
-        if (Math.abs(diff) <= 0.50 && Math.abs(diff) > 0 && normalizedLineItems.length > 0) {
-            const largest = normalizedLineItems.reduce((p, c) => (c.taxable_value > p.taxable_value ? c : p), normalizedLineItems[0]);
-            largest.igst_amount = round2(largest.igst_amount + diff);
-            largest.total_amount = round2(largest.taxable_value + largest.igst_amount);
-        }
-    } else {
-        const lineCgstSum = round2(normalizedLineItems.reduce((acc, it) => acc + it.cgst_amount, 0));
-        const diff = round2(totalCgst - lineCgstSum);
-        if (Math.abs(diff) <= 0.50 && Math.abs(diff) > 0 && normalizedLineItems.length > 0) {
-            const largest = normalizedLineItems.reduce((p, c) => (c.taxable_value > p.taxable_value ? c : p), normalizedLineItems[0]);
-            largest.cgst_amount = round2(largest.cgst_amount + diff);
-            largest.sgst_amount = round2(largest.sgst_amount + diff);
-            largest.total_amount = round2(largest.taxable_value + largest.cgst_amount + largest.sgst_amount);
-        }
-    }
-
-    // 7. Pure Accounting Math Calculation & Reconciliation (Law 4 & Law 5 - Strict Round Off <= 0.99)
+    // 7. Pure Accounting Math
     let itemsTaxableSum = round2(normalizedLineItems.reduce((acc, it) => acc + (it.taxable_value || 0), 0));
-
-    // Task 2.4: Subtotal reconciliation within ±0.15 delta
-    const printedTaxableSubtotal = parseFloat(raw.printed_taxable_subtotal || 0);
-    if (printedTaxableSubtotal > 0 && Math.abs(itemsTaxableSum - printedTaxableSubtotal) <= 0.15 && Math.abs(itemsTaxableSum - printedTaxableSubtotal) > 0.0001 && normalizedLineItems.length > 0) {
-        const subDelta = round2(printedTaxableSubtotal - itemsTaxableSum);
-        const largest = normalizedLineItems.reduce((p, c) => (c.taxable_value > p.taxable_value ? c : p), normalizedLineItems[0]);
-        largest.taxable_value = round2(largest.taxable_value + subDelta);
-        largest.total_amount = round2(largest.taxable_value + largest.cgst_amount + largest.sgst_amount + largest.igst_amount);
-        itemsTaxableSum = round2(itemsTaxableSum + subDelta);
-    }
-    const totalTaxable = itemsTaxableSum;
-
-    const freightCharges = round2(parseFloat(raw.printed_freight_or_other_charges ?? raw.freight_charges ?? raw.freightCharges ?? raw.freight ?? 0));
+    const freightCharges = round2(parseFloat(raw.printed_freight_or_other_charges ?? raw.freight_charges ?? 0));
     const calculatedTotalBeforeRoundOff = round2(itemsTaxableSum + totalCgst + totalSgst + totalIgst + freightCharges);
-
-    const printedGrandTotal = parseFloat(raw.printed_grand_total ?? raw.grand_total ?? raw.totalAmount ?? 0);
-    const printedRoundOff = parseFloat(raw.printed_round_off ?? raw.round_off ?? raw.roundoff_amount ?? 0);
+    const printedGrandTotal = parseFloat(raw.printed_grand_total ?? raw.grand_total ?? 0);
+    const printedRoundOff = parseFloat(raw.printed_round_off ?? raw.round_off ?? 0);
+    const globalDiscount = round2(parseFloat(raw.printed_discount_amount ?? raw.discount_amount ?? raw.trade_discount ?? 0));
+    const globalCreditNote = round2(parseFloat(raw.printed_credit_note_amount ?? raw.credit_note_amount ?? 0));
 
     let grandTotal = 0;
     let roundOff = 0;
-
     if (printedGrandTotal > 0) {
         const rawDiff = round2(printedGrandTotal - calculatedTotalBeforeRoundOff);
-        if (Math.abs(rawDiff) <= 0.99) {
-            // Difference is within ±0.99: legitimate fractional round-off
-            roundOff = rawDiff;
-            grandTotal = round2(printedGrandTotal);
-        } else {
-            // Difference > 0.99: Keep round_off strictly capped to fractional paisa
-            roundOff = (Math.abs(printedRoundOff) <= 0.99) ? round2(printedRoundOff) : 0.0;
-            grandTotal = round2(calculatedTotalBeforeRoundOff + roundOff);
-        }
+        if (Math.abs(rawDiff) <= 0.99) { roundOff = rawDiff; grandTotal = round2(printedGrandTotal); }
+        else { roundOff = (Math.abs(printedRoundOff) <= 0.99) ? round2(printedRoundOff) : 0.0; grandTotal = round2(calculatedTotalBeforeRoundOff + roundOff); }
     } else {
-        roundOff = (Math.abs(printedRoundOff) <= 0.99) ? round2(printedRoundOff) : 0.0;
-        grandTotal = round2(calculatedTotalBeforeRoundOff + roundOff);
+        grandTotal = round2(calculatedTotalBeforeRoundOff + ((Math.abs(printedRoundOff) <= 0.99) ? round2(printedRoundOff) : 0.0));
     }
 
-    const actualDebits = round2(itemsTaxableSum + totalCgst + totalSgst + totalIgst + freightCharges + roundOff);
-    const balanceDiff = round2(actualDebits - grandTotal);
+    // --- RECONCILIATION ---
+    let actualDebits = round2(itemsTaxableSum + totalCgst + totalSgst + totalIgst + freightCharges + roundOff);
+    let balanceDiff = round2(actualDebits - grandTotal);
+    let status = 'verified';
     let mathDiff = balanceDiff;
 
-    let status = 'verified';
     if (Math.abs(balanceDiff) <= 0.01) {
         mathDiff = 0.0;
         if (printedGrandTotal > 0 && Math.abs(grandTotal - printedGrandTotal) > 0.05) {
-            status = 'math_error';
-            mathDiff = round2(grandTotal - printedGrandTotal);
-        } else {
-            status = 'verified';
+            const netPayableExpected = round2(grandTotal - globalDiscount - globalCreditNote);
+            if (Math.abs(netPayableExpected - printedGrandTotal) <= 1.00) { status = 'verified'; mathDiff = 0.0; }
+            else { status = 'math_error'; mathDiff = round2(grandTotal - printedGrandTotal); }
         }
-    } else {
-        status = 'math_error';
+    } else { status = 'math_error'; }
+
+    const printedTaxableSubtotal = parseFloat(raw.printed_taxable_subtotal || 0);
+    if (printedTaxableSubtotal > 0 && (printedTaxableSubtotal - itemsTaxableSum) > 10.00) {
+        status = 'truncation_error'; mathDiff = round2(printedTaxableSubtotal - itemsTaxableSum);
     }
 
-    // 7. Header Fields
-    let invNum = (raw.invoice_number || raw.invoiceNumber || raw.bill_number || raw.billNo || raw.supplier_ref || raw.reference || '').trim();
-    const rawDate = raw.invoice_date || raw.invoiceDate || '';
-    const invDateIso = parseIndianDateToISO(rawDate);
-    const dueDateIso = (raw.due_date || raw.dueDate) ? parseIndianDateToISO(raw.due_date || raw.dueDate) : '';
-    const paymentMode = (raw.payment_mode || raw.paymentMode || '').trim();
-    const reverseChargeRaw = raw.reverse_charge || raw.reverseCharge || 'No';
-    const reverseCharge = String(reverseChargeRaw).trim().toLowerCase() === 'yes' ? 'Yes' : 'No';
-    const buyerOrderNo = (raw.buyer_order_no || raw.buyerOrderNo || '').trim();
-    const orderDateIso = (raw.order_date || raw.orderDate) ? parseIndianDateToISO(raw.order_date || raw.orderDate) : '';
-    const supplierRef = (raw.supplier_ref || raw.supplierRef || '').trim();
-    const vehicleNo = (raw.vehicle_no || raw.vehicleNumber || raw.vehicle_number || '').trim();
-    const ewayBillNo = (raw.eway_bill_no || raw.ewayBillNo || '').trim();
+    let invNum = (raw.invoice_number || raw.invoiceNumber || raw.bill_number || '').trim();
+    if (!invNum && (vendorName || grandTotal > 0)) { invNum = `INV-${Math.floor(Math.random() * 10000)}`; }
 
-    if (!invNum) {
-        invNum = buyerOrderNo || supplierRef || '';
-    }
-    if (!invNum && (vendorName || grandTotal > 0)) {
-        const cleanDate = invDateIso ? invDateIso.replace(/-/g, '') : 'NODATE';
-        const cleanVendor = vendorName.replace(/[^a-zA-Z0-9]/g, '').slice(0, 6).toUpperCase() || 'BILL';
-        invNum = `${cleanVendor}-${cleanDate}-01`;
-    }
-
-    if (!vendorName || !invNum || grandTotal <= 0) {
-        if (status !== 'math_error') {
-            status = 'needs_review';
-        }
-    }
-
+    // 8. OUTPUT (Using ...raw to ENSURE DATES AND ALL ORIGINAL FIELDS ARE KEPT)
     return {
-        // Complete Bookkeeper OCR Schema
-        vendor_name: vendorName,
-        vendor_gstin: vendorGstin,
-        vendor_address: vendorAddress,
-        vendor_state: vendorState,
-        vendor_pincode: vendorPincode,
-        vendor_phone: vendorPhone,
-        bank_name: bankName,
-        account_number: accountNumber,
-        ifsc_code: ifscCode,
-        upi_id: upiId,
-
-        buyer_name: buyerName,
-        buyer_gstin: buyerGstin,
-        buyer_state: buyerState,
-        buyer_address: buyerAddress,
-
-        invoice_number: invNum,
-        invoice_date: invDateIso,
-        due_date: dueDateIso,
-        payment_mode: paymentMode,
-        reverse_charge: reverseCharge,
-        buyer_order_no: buyerOrderNo,
-        order_date: orderDateIso,
-        supplier_ref: supplierRef,
-        vehicle_no: vehicleNo,
-        eway_bill_no: ewayBillNo,
-
-        line_items: normalizedLineItems,
-        total_taxable: totalTaxable,
-        total_cgst: totalCgst,
-        total_sgst: totalSgst,
-        total_igst: totalIgst,
-        freight_charges: freightCharges,
-        round_off: roundOff,
-        grand_total: grandTotal,
-
-        printed_taxable_subtotal: parseFloat(raw.printed_taxable_subtotal ?? 0),
-        printed_cgst_total: parseFloat(raw.printed_cgst_total ?? 0),
-        printed_sgst_total: parseFloat(raw.printed_sgst_total ?? 0),
-        printed_igst_total: parseFloat(raw.printed_igst_total ?? 0),
-        printed_cess_total: parseFloat(raw.printed_cess_total ?? 0),
-        printed_freight_or_other_charges: freightCharges,
-        printed_round_off: parseFloat(raw.printed_round_off ?? 0),
-        printed_grand_total: printedGrandTotal,
-        printed_zero_rated_taxable: parseFloat(raw.printed_zero_rated_taxable ?? 0),
-        printed_tax_slab_summary: Array.isArray(raw.printed_tax_slab_summary) ? raw.printed_tax_slab_summary : [],
-
-        verification_state: status,
-        math_difference: mathDiff,
-
-        // Backward compatibility aliases
-        items: normalizedLineItems,
-        taxable_amount: totalTaxable,
-        cgst_amount: totalCgst,
-        sgst_amount: totalSgst,
-        igst_amount: totalIgst,
-        roundoff_amount: roundOff,
-        roundOff: roundOff ? Number(roundOff).toFixed(2) : '0.00',
-        supplier_name: vendorName,
-        supplier_gstin: vendorGstin,
-        gstin: vendorGstin,
-        supplier_address: vendorAddress,
-        supplier_state: vendorState,
-        place_of_supply: vendorState
+        ...raw,
+        vendor_name: vendorName, vendor_gstin: vendorGstin, vendor_state: vendorState, vendor_address: vendorAddress,
+        vendor_pincode: vendorPincode, buyer_name: buyerName, buyer_gstin: buyerGstin, buyer_state: buyerState,
+        invoice_number: invNum, line_items: normalizedLineItems, total_taxable: itemsTaxableSum,
+        total_cgst: totalCgst, total_sgst: totalSgst, total_igst: totalIgst, freight_charges: freightCharges,
+        round_off: roundOff, grand_total: grandTotal, verification_state: status, math_difference: mathDiff,
+        items: normalizedLineItems, taxable_amount: itemsTaxableSum, cgst_amount: totalCgst,
+        sgst_amount: totalSgst, igst_amount: totalIgst, roundoff_amount: roundOff
     };
 }
 
@@ -1465,8 +1221,12 @@ async function processFileWithGemini(genAI, filePath, mimeType, res = null) {
     11. Grand Total Validation: Ensure numeric amounts are precise numbers without currency symbols.
     `;
 
-    const modelCandidates = ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite"];
-    const maxAttempts = 6;
+    // 1. Swap the order: Put the high-daily-limit Lite model FIRST so you don't burn your 20-request cap.
+    // 1. Prioritize the smarter models for dense 30+ item invoices
+    const modelCandidates = ["gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite"];
+
+    // 2. Reduce max attempts from 6 to 3 to prevent burning daily quotas on a single bad file
+    const maxAttempts = 3;
     let lastError = null;
     let modelIdx = 0;
 
@@ -1479,6 +1239,7 @@ async function processFileWithGemini(genAI, filePath, mimeType, res = null) {
                 temperature: 0.1
             }
         });
+
         try {
             const result = await model.generateContent([prompt, imagePart]);
             let responseText = result.response.text();
@@ -1676,6 +1437,11 @@ app.post('/api/extract-invoice', ClerkExpressRequireAuth({}), extractLimiter, up
                         fileName: file.originalname,
                         fileSize: formatBytes(file.size),
                         fileType: file.mimetype.includes('pdf') ? 'pdf' : 'image',
+                        file_name: file.filename,
+                        filePath: `/uploads/${file.filename}`,
+                        file_path: `/uploads/${file.filename}`,
+                        fileUrl: `/uploads/${file.filename}`,
+                        file_url: `/uploads/${file.filename}`,
 
                         // Full Bookkeeper OCR Schema (Task 1)
                         vendor_name: audited.vendor_name,
@@ -1757,6 +1523,9 @@ app.post('/api/extract-invoice', ClerkExpressRequireAuth({}), extractLimiter, up
                         uploadedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
                     };
                 } catch (fileErr) {
+                    if (fs.existsSync(file.path)) {
+                        fs.unlink(file.path, () => { });
+                    }
                     console.error(`Error processing file ${file.originalname}:`, fileErr);
                     if (fileErr.status === 503 || (fileErr.message && (fileErr.message.includes('503') || fileErr.message.includes('temporarily unavailable')))) {
                         throw fileErr;
@@ -1786,10 +1555,6 @@ app.post('/api/extract-invoice', ClerkExpressRequireAuth({}), extractLimiter, up
                         tallyXml: '',
                         errorText: fileErr.message
                     };
-                } finally {
-                    if (fs.existsSync(file.path)) {
-                        fs.unlink(file.path, () => { });
-                    }
                 }
             })
         );
@@ -1800,7 +1565,7 @@ app.post('/api/extract-invoice', ClerkExpressRequireAuth({}), extractLimiter, up
             const stmt = db.prepare('INSERT OR REPLACE INTO invoices (id, orgId, userId, fileName, vendorName, invoiceNumber, totalAmount, verificationState, fullData) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
             processedInvoices.forEach(inv => {
                 if (inv && inv.id && !inv.id.endsWith('_err')) {
-                    stmt.run(inv.id, orgId, userId, inv.fileName, inv.vendorName, inv.invoiceNumber, inv.totalAmount, inv.verificationState, JSON.stringify(inv));
+                    stmt.run(inv.id, orgId, userId, inv.file_name || inv.fileName, inv.vendorName, inv.invoiceNumber, inv.totalAmount, inv.verificationState || inv.verification_state, JSON.stringify(inv));
                     if (inv.vendorName) {
                         saveVendorMapping(orgId, inv.vendorName, inv.tallyLedgerName, inv.gstin);
                     }
@@ -1849,6 +1614,25 @@ app.get('/api/invoices', ClerkExpressRequireAuth({}), (req, res) => {
             const data = rows.map(row => {
                 try {
                     const parsed = JSON.parse(row.fullData);
+                    if (!parsed) return null;
+                    const rawDate = parsed.invoice_date || parsed.date || parsed.rawDate || parsed.invoiceDate || '';
+                    parsed.invoice_date = rawDate;
+                    parsed.date = rawDate;
+                    parsed.rawDate = rawDate;
+                    parsed.invoiceDate = rawDate;
+                    const state = parsed.verification_state || parsed.verificationState || row.verificationState || 'needs_review';
+                    parsed.verification_state = state;
+                    parsed.verificationState = state;
+                    if (!parsed.file_name && row.fileName) {
+                        parsed.file_name = row.fileName;
+                    }
+                    if (!parsed.fileUrl && !parsed.file_url) {
+                        const targetFile = parsed.file_name || row.fileName;
+                        if (targetFile) {
+                            parsed.fileUrl = `/uploads/${targetFile}`;
+                            parsed.file_url = `/uploads/${targetFile}`;
+                        }
+                    }
                     if (parsed && (!parsed.tallyXml || parsed.tallyXml.includes('<ALLLEDGERENTRIES.LIST>') || parsed.tallyXml.includes('<TAXTYPE>GST</TAXTYPE>'))) {
                         parsed.tallyXml = generateTallyXml(parsed);
                     }
@@ -1905,44 +1689,44 @@ app.put('/api/invoices/:id', ClerkExpressRequireAuth({}), (req, res) => {
 
             // Build the data object expected by generateTallyXml
             const xmlInput = {
-                invoice_number:   merged.invoice_number || merged.invoiceNumber || '',
-                invoice_date:     parseIndianDateToISO(merged.invoiceDate || merged.invoice_date || merged.date || ''),
-                due_date:         merged.due_date || merged.dueDate || '',
-                payment_mode:     merged.payment_mode || merged.paymentMode || '',
-                reverse_charge:   merged.reverse_charge || merged.reverseCharge || 'No',
-                buyer_order_no:   merged.buyer_order_no || merged.buyerOrderNo || '',
-                order_date:       merged.order_date || merged.orderDate || '',
-                supplier_ref:     merged.supplier_ref || merged.supplierRef || '',
-                vehicle_no:       merged.vehicle_no || merged.vehicleNumber || merged.vehicle_number || '',
-                eway_bill_no:     merged.eway_bill_no || merged.ewayBillNo || '',
+                invoice_number: merged.invoice_number || merged.invoiceNumber || '',
+                invoice_date: parseIndianDateToISO(merged.invoiceDate || merged.invoice_date || merged.date || ''),
+                due_date: merged.due_date || merged.dueDate || '',
+                payment_mode: merged.payment_mode || merged.paymentMode || '',
+                reverse_charge: merged.reverse_charge || merged.reverseCharge || 'No',
+                buyer_order_no: merged.buyer_order_no || merged.buyerOrderNo || '',
+                order_date: merged.order_date || merged.orderDate || '',
+                supplier_ref: merged.supplier_ref || merged.supplierRef || '',
+                vehicle_no: merged.vehicle_no || merged.vehicleNumber || merged.vehicle_number || '',
+                eway_bill_no: merged.eway_bill_no || merged.ewayBillNo || '',
 
-                vendor_name:      merged.vendor_name || merged.vendorName || '',
-                vendor_gstin:     merged.vendor_gstin || merged.gstin || '',
-                vendor_address:   merged.vendor_address || merged.supplier_address || merged.supplierAddress || '',
-                vendor_state:     merged.vendor_state || merged.supplier_state || merged.place_of_supply || merged.placeOfSupply || '',
-                vendor_pincode:   merged.vendor_pincode || merged.pincode || '',
-                vendor_phone:     merged.vendor_phone || merged.phone || '',
-                bank_name:        merged.bank_name || merged.bankName || '',
-                account_number:   merged.account_number || merged.accountNumber || '',
-                ifsc_code:        merged.ifsc_code || merged.ifscCode || '',
-                upi_id:           merged.upi_id || merged.upiId || '',
+                vendor_name: merged.vendor_name || merged.vendorName || '',
+                vendor_gstin: merged.vendor_gstin || merged.gstin || '',
+                vendor_address: merged.vendor_address || merged.supplier_address || merged.supplierAddress || '',
+                vendor_state: merged.vendor_state || merged.supplier_state || merged.place_of_supply || merged.placeOfSupply || '',
+                vendor_pincode: merged.vendor_pincode || merged.pincode || '',
+                vendor_phone: merged.vendor_phone || merged.phone || '',
+                bank_name: merged.bank_name || merged.bankName || '',
+                account_number: merged.account_number || merged.accountNumber || '',
+                ifsc_code: merged.ifsc_code || merged.ifscCode || '',
+                upi_id: merged.upi_id || merged.upiId || '',
 
-                buyer_name:       merged.buyer_name || merged.buyerName || '',
-                buyer_gstin:      merged.buyer_gstin || merged.buyerGstin || '',
-                buyer_state:      merged.buyer_state || merged.buyerState || '',
-                buyer_address:    merged.buyer_address || merged.buyerAddress || '',
+                buyer_name: merged.buyer_name || merged.buyerName || '',
+                buyer_gstin: merged.buyer_gstin || merged.buyerGstin || '',
+                buyer_state: merged.buyer_state || merged.buyerState || '',
+                buyer_address: merged.buyer_address || merged.buyerAddress || '',
 
-                line_items:       merged.line_items || merged.items || [],
-                items:            merged.line_items || merged.items || [],
-                total_taxable:    parseFloat(merged.total_taxable ?? merged.taxableAmount ?? merged.taxable_amount ?? 0),
-                total_cgst:       parseFloat(merged.total_cgst ?? merged.taxBreakdown?.cgst ?? merged.cgst_amount ?? 0),
-                total_sgst:       parseFloat(merged.total_sgst ?? merged.taxBreakdown?.sgst ?? merged.sgst_amount ?? 0),
-                total_igst:       parseFloat(merged.total_igst ?? merged.taxBreakdown?.igst ?? merged.igst_amount ?? 0),
-                freight_charges:  parseFloat(merged.freight_charges ?? merged.freightCharges ?? 0),
-                round_off:        parseFloat(merged.round_off ?? merged.roundoffAmount ?? merged.roundoff_amount ?? 0),
-                grand_total:      parseFloat(merged.grand_total ?? merged.totalAmount ?? 0),
-                purchase_ledger:  merged.tallyLedgerName || 'Purchase Account',
-                narration:        merged.narration || ''
+                line_items: merged.line_items || merged.items || [],
+                items: merged.line_items || merged.items || [],
+                total_taxable: parseFloat(merged.total_taxable ?? merged.taxableAmount ?? merged.taxable_amount ?? 0),
+                total_cgst: parseFloat(merged.total_cgst ?? merged.taxBreakdown?.cgst ?? merged.cgst_amount ?? 0),
+                total_sgst: parseFloat(merged.total_sgst ?? merged.taxBreakdown?.sgst ?? merged.sgst_amount ?? 0),
+                total_igst: parseFloat(merged.total_igst ?? merged.taxBreakdown?.igst ?? merged.igst_amount ?? 0),
+                freight_charges: parseFloat(merged.freight_charges ?? merged.freightCharges ?? 0),
+                round_off: parseFloat(merged.round_off ?? merged.roundoffAmount ?? merged.roundoff_amount ?? 0),
+                grand_total: parseFloat(merged.grand_total ?? merged.totalAmount ?? 0),
+                purchase_ledger: merged.tallyLedgerName || 'Purchase Account',
+                narration: merged.narration || ''
             };
 
             // Regenerate Tally XML with current field values
@@ -1954,15 +1738,15 @@ app.put('/api/invoices/:id', ClerkExpressRequireAuth({}), (req, res) => {
             db.run(
                 'UPDATE invoices SET vendorName = ?, invoiceNumber = ?, totalAmount = ?, verificationState = ?, fullData = ? WHERE id = ? AND orgId = ?',
                 [
-                    merged.vendorName      || '',
-                    merged.invoiceNumber   || '',
+                    merged.vendorName || '',
+                    merged.invoiceNumber || '',
                     parseFloat(merged.totalAmount || 0),
                     merged.verificationState || 'needs_review',
                     fullDataStr,
                     id,
                     orgId
                 ],
-                function(updateErr) {
+                function (updateErr) {
                     if (updateErr) {
                         return res.status(500).json({ success: false, error: 'Failed to save invoice: ' + updateErr.message });
                     }
@@ -1974,6 +1758,25 @@ app.put('/api/invoices/:id', ClerkExpressRequireAuth({}), (req, res) => {
         console.error('Invoice Update Error:', err.message);
         res.status(500).json({ success: false, error: err.message || 'Internal Server Error' });
     }
+});
+
+// API ENDPOINT: DELETE /api/invoices
+app.delete('/api/invoices', ClerkExpressRequireAuth({}), (req, res) => {
+    const orgId = req.auth ? (req.auth.orgId || 'default_org') : 'default_org';
+    const { ids } = req.body; // Expecting an array of invoice IDs
+
+    if (!ids || !Array.isArray(ids) || ids.length === 0) {
+        return res.status(400).json({ success: false, error: 'No invoice IDs provided.' });
+    }
+
+    const idList = ids.map(item => (typeof item === 'object' && item !== null && item.id) ? item.id : item);
+    const placeholders = idList.map(() => '?').join(',');
+    const query = `DELETE FROM invoices WHERE orgId = ? AND id IN (${placeholders})`;
+
+    db.run(query, [orgId, ...idList], function (err) {
+        if (err) return res.status(500).json({ success: false, error: err.message });
+        res.json({ success: true, deletedCount: this.changes });
+    });
 });
 
 // Config endpoint for frontend Clerk publishable key
@@ -2049,14 +1852,14 @@ app.use((err, req, res, next) => {
 
 // Start Server
 if (require.main === module) {
-app.listen(PORT, () => {
-    console.log(`========================================================`);
-    console.log(`⚡ TallyFlow AI Backend Middleware Server Running`);
-    console.log(`🔒 Security: Gemini API Key secured on backend via .env`);
-    console.log(`🌐 Server Base URL: http://localhost:${PORT}`);
-    console.log(`🚀 API Endpoint:   http://localhost:${PORT}/api/extract-invoice`);
-    console.log(`========================================================`);
-});
+    app.listen(PORT, () => {
+        console.log(`========================================================`);
+        console.log(`⚡ TallyFlow AI Backend Middleware Server Running`);
+        console.log(`🔒 Security: Gemini API Key secured on backend via .env`);
+        console.log(`🌐 Server Base URL: http://localhost:${PORT}`);
+        console.log(`🚀 API Endpoint:   http://localhost:${PORT}/api/extract-invoice`);
+        console.log(`========================================================`);
+    });
 }
 
 // Export helpers for testing and external integrations

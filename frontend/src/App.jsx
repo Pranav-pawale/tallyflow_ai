@@ -128,6 +128,25 @@ export const formatDateForTallyXML = (isoDateStr) => {
     return formatTallyDate(isoDateStr);
 };
 
+export const getInvoiceImageUrl = (invoice) => {
+    if (!invoice) return '';
+    const rawUrl = invoice.file_url || invoice.fileUrl || '';
+    if (rawUrl) {
+        if (rawUrl.startsWith('http://') || rawUrl.startsWith('https://') || rawUrl.startsWith('blob:')) {
+            return rawUrl;
+        }
+        if (rawUrl.startsWith('/')) {
+            return `http://localhost:5000${rawUrl}`;
+        }
+        return `http://localhost:5000/${rawUrl}`;
+    }
+    const fileName = invoice.file_name || invoice.fileName;
+    if (fileName) {
+        return `http://localhost:5000/uploads/${fileName}`;
+    }
+    return '';
+};
+
 // Step 2A: Extract 10-character PAN from 15-digit GSTIN
 export const getPanFromGstin = (gstin) => {
     if (!gstin || typeof gstin !== 'string') return '';
@@ -296,7 +315,7 @@ function App() {
     const [isSaving, setIsSaving] = useState(false);
     const [toast, setToast] = useState(null); // { message, type: 'success' | 'error' }
     const [isUploading, setIsUploading] = useState(false);
-    const [isDragging, setIsDragging] = useState(false);
+    const [isFileDragging, setIsFileDragging] = useState(false);
     const [isDataMappingOpen, setIsDataMappingOpen] = useState(true);
     const [isDataModalOpen, setIsDataModalOpen] = useState(false);
     const [companies, setCompanies] = useState(["Tata Motors (FY 24-25)", "Reliance Retail Ltd", "Infosys Technologies"]);
@@ -324,10 +343,22 @@ function App() {
                 });
                 const result = await response.json();
                 if (result.success) {
-                    const normalized = (result.data || []).map(inv => ({
-                        ...inv,
-                        invoiceDate: parseIndianDateToISO(inv.invoiceDate || inv.invoice_date || '')
-                    }));
+                    const normalized = (result.data || []).map(inv => {
+                        const rawDate = inv.invoice_date || inv.date || inv.invoiceDate || '';
+                        const isoDate = parseIndianDateToISO(rawDate);
+                        const fileName = inv.file_name || inv.fileName || '';
+                        const fileUrl = inv.file_url || inv.fileUrl || (fileName ? `/uploads/${fileName}` : '');
+                        return {
+                            ...inv,
+                            fileName: inv.fileName || fileName,
+                            file_name: fileName,
+                            fileUrl,
+                            file_url: fileUrl,
+                            invoice_date: isoDate,
+                            date: isoDate,
+                            invoiceDate: isoDate
+                        };
+                    });
                     setInvoices(normalized);
                 }
             } catch (err) {
@@ -362,6 +393,77 @@ function App() {
     // Audit Review View States
     const [activeReviewInvoice, setActiveReviewInvoice] = useState(null);
     const [activeHoverSection, setActiveHoverSection] = useState(null);
+    const [zoomScale, setZoomScale] = useState(1);
+    const [pan, setPan] = useState({ x: 0, y: 0 });
+    const [isDragging, setIsDragging] = useState(false);
+    const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+    const invoiceContainerRef = useRef(null);
+
+    const handleMouseDown = (e) => {
+        if (zoomScale > 1) {
+            e.preventDefault();
+            setIsDragging(true);
+            setDragStart({ x: e.clientX - pan.x, y: e.clientY - pan.y });
+        }
+    };
+
+    const handleMouseMove = (e) => {
+        if (!isDragging || zoomScale === 1) return;
+        setPan({
+            x: e.clientX - dragStart.x,
+            y: e.clientY - dragStart.y
+        });
+    };
+
+    const handleMouseUp = () => {
+        setIsDragging(false);
+    };
+
+    const handleWheel = (e) => {
+        if (e.cancelable) e.preventDefault();
+        e.stopPropagation();
+        setZoomScale(prev => {
+            const calculated = prev + (e.deltaY < 0 ? 0.1 : -0.1);
+            const newScale = Math.min(Math.max(Number(calculated.toFixed(2)), 1), 4);
+            if (newScale === 1) setPan({ x: 0, y: 0 }); // Reset pan when fully zoomed out
+            return newScale;
+        });
+    };
+
+    // Non-passive wheel event listener to cleanly prevent page scrolling during image zoom
+    useEffect(() => {
+        const el = invoiceContainerRef.current;
+        if (!el) return;
+
+        const onWheel = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            setZoomScale(prev => {
+                const calculated = prev + (e.deltaY < 0 ? 0.1 : -0.1);
+                const newScale = Math.min(Math.max(Number(calculated.toFixed(2)), 1), 4);
+                if (newScale === 1) setPan({ x: 0, y: 0 });
+                return newScale;
+            });
+        };
+
+        el.addEventListener('wheel', onWheel, { passive: false });
+        return () => el.removeEventListener('wheel', onWheel);
+    }, [activeReviewInvoice]);
+
+    // Global mouseup listener while dragging to avoid getting stuck if mouse is released outside
+    useEffect(() => {
+        if (!isDragging) return;
+        const onGlobalMouseUp = () => setIsDragging(false);
+        window.addEventListener('mouseup', onGlobalMouseUp);
+        return () => window.removeEventListener('mouseup', onGlobalMouseUp);
+    }, [isDragging]);
+
+    // Reset zoom and pan when switching active review invoice
+    useEffect(() => {
+        setZoomScale(1);
+        setPan({ x: 0, y: 0 });
+        setIsDragging(false);
+    }, [activeReviewInvoice?.id]);
 
     const fileInputRef = useRef(null);
 
@@ -582,26 +684,75 @@ function App() {
         }
     };
 
+    // Propagate Invoice Updates to Main Dashboard State Instantly
+    const handleUpdateInvoice = (updatedInvoice) => {
+        setInvoices(prev => prev.map(inv => inv.id === updatedInvoice.id ? updatedInvoice : inv));
+    };
+
     // Delete Handlers
-    const deleteInvoice = (id) => {
-        setInvoices(prev => prev.filter(i => i.id !== id));
-        setSelectedIds(prev => {
-            const next = new Set(prev);
-            next.delete(id);
-            return next;
-        });
-        if (activeReviewInvoice && activeReviewInvoice.id === id) {
-            setActiveReviewInvoice(null);
+    const deleteSelectedInvoices = async () => {
+        const idsToDelete = Array.from(selectedIds);
+        if (idsToDelete.length === 0) return;
+        try {
+            const token = await getToken();
+            const headers = { 'Content-Type': 'application/json' };
+            if (token) headers['Authorization'] = `Bearer ${token}`;
+
+            const response = await fetch('/api/invoices', {
+                method: 'DELETE',
+                headers,
+                body: JSON.stringify({ ids: idsToDelete })
+            });
+            const result = await response.json();
+            if (result.success) {
+                // Only update React state if DB deletion was successful
+                setInvoices(prev => prev.filter(inv => !idsToDelete.includes(inv.id)));
+                setSelectedIds(new Set());
+                if (activeReviewInvoice && idsToDelete.includes(activeReviewInvoice.id)) {
+                    setActiveReviewInvoice(null);
+                }
+            } else {
+                console.error("Deletion failed:", result.error);
+            }
+        } catch (err) {
+            console.error("Error calling delete endpoint:", err);
         }
     };
 
-    const deleteSelected = () => {
-        setInvoices(prev => prev.filter(i => !selectedIds.has(i.id)));
-        setSelectedIds(new Set());
-        if (activeReviewInvoice && selectedIds.has(activeReviewInvoice.id)) {
-            setActiveReviewInvoice(null);
+    const deleteSelected = deleteSelectedInvoices;
+
+    const deleteInvoice = async (id) => {
+        if (!id) return;
+        try {
+            const token = await getToken();
+            const headers = { 'Content-Type': 'application/json' };
+            if (token) headers['Authorization'] = `Bearer ${token}`;
+
+            const response = await fetch('/api/invoices', {
+                method: 'DELETE',
+                headers,
+                body: JSON.stringify({ ids: [id] })
+            });
+            const result = await response.json();
+            if (result.success) {
+                // Only update React state if DB deletion was successful
+                setInvoices(prev => prev.filter(inv => inv.id !== id));
+                setSelectedIds(prev => {
+                    const next = new Set(prev);
+                    next.delete(id);
+                    return next;
+                });
+                if (activeReviewInvoice && activeReviewInvoice.id === id) {
+                    setActiveReviewInvoice(null);
+                }
+            } else {
+                console.error("Deletion failed:", result.error);
+            }
+        } catch (err) {
+            console.error("Error calling delete endpoint:", err);
         }
     };
+
 
     // Computed Dynamic UI Metrics (100% derived from React State)
     const totalInvoicesCount = invoices.length;
@@ -852,27 +1003,28 @@ function App() {
         if (!activeReviewInvoice) return;
 
         const dateVal = activeReviewInvoice.invoiceDate || activeReviewInvoice.invoice_date || activeReviewInvoice.date || '';
-        const approvedInvoice = {
+        const payload = {
             ...activeReviewInvoice,
             invoiceDate: dateVal,
             invoice_date: dateVal,
             date: dateVal,
-            verificationState: 'verified'
+            verificationState: 'verified',
+            verification_state: 'verified'
         };
 
-        if (approvedInvoice.tallyXml && dateVal) {
+        if (payload.tallyXml && dateVal) {
             const formatted = formatTallyDate(dateVal);
-            approvedInvoice.tallyXml = approvedInvoice.tallyXml
+            payload.tallyXml = payload.tallyXml
                 .replace(/<DATE>[\s\S]*?<\/DATE>/gi, `<DATE>${formatted}</DATE>`)
                 .replace(/<EFFECTIVEDATE>[\s\S]*?<\/EFFECTIVEDATE>/gi, `<EFFECTIVEDATE>${formatted}</EFFECTIVEDATE>`)
                 .replace(/<REFERENCEDATE>[\s\S]*?<\/REFERENCEDATE>/gi, `<REFERENCEDATE>${formatted}</REFERENCEDATE>`);
         }
 
         // Immediately update the main parent invoices state
-        setInvoices(prev => prev.map(inv => inv.id === approvedInvoice.id ? approvedInvoice : inv));
+        handleUpdateInvoice(payload);
 
         // Advance to next invoice in queue needing review
-        const remaining = invoices.filter(i => i.id !== approvedInvoice.id && i.verificationState !== 'verified');
+        const remaining = invoices.filter(i => i.id !== payload.id && i.verificationState !== 'verified' && i.verification_state !== 'verified');
         if (remaining.length > 0) {
             setActiveReviewInvoice(remaining[0]);
         } else {
@@ -882,21 +1034,23 @@ function App() {
         // Persist to DB and regenerate XML server-side asynchronously
         try {
             const token = await getToken();
-            const response = await fetch(`http://localhost:5000/api/invoices/${approvedInvoice.id}`, {
+            const headers = { 'Content-Type': 'application/json' };
+            if (token) headers['Authorization'] = `Bearer ${token}`;
+
+            const response = await fetch(`/api/invoices/${payload.id}`, {
                 method: 'PUT',
-                headers: {
-                    'Authorization': `Bearer ${token}`,
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify(approvedInvoice)
+                headers,
+                body: JSON.stringify(payload)
             });
             const result = await response.json();
             if (result.success && result.data) {
                 const updatedData = {
                     ...result.data,
+                    verificationState: 'verified',
+                    verification_state: 'verified',
                     invoiceDate: parseIndianDateToISO(result.data.invoiceDate || result.data.invoice_date || result.data.date || '')
                 };
-                setInvoices(prev => prev.map(inv => inv.id === updatedData.id ? updatedData : inv));
+                handleUpdateInvoice(updatedData);
             }
         } catch (err) {
             console.error('Approve and next persist error:', err);
@@ -1054,7 +1208,8 @@ function App() {
                                 </button>
                             </div>
 
-                            {/* Secondary Collapsible Group: Data & Mapping */}
+                            {/* Secondary Collapsible Group: Data & Mapping (Removed to keep only Invoice Workbench) */}
+                            {/*
                             <div>
                                 <button
                                     type="button"
@@ -1088,6 +1243,7 @@ function App() {
                                     </div>
                                 )}
                             </div>
+                            */}
                         </div>
 
                         {/* Ultra-Minimal Footer */}
@@ -1158,11 +1314,22 @@ function App() {
                                     </div>
 
                                     <div className="flex items-center gap-2">
-                                        {activeReviewInvoice.verificationState === 'verified' ? (
+                                        {activeReviewInvoice.verification_state === 'verified' && (
                                             <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 text-[11px] font-semibold">
                                                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span> Verified & Tally-Ready
                                             </span>
-                                        ) : (
+                                        )}
+                                        {activeReviewInvoice.verification_state === 'math_error' && (
+                                            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-rose-50 text-rose-700 border border-rose-200 text-[11px] font-semibold">
+                                                <span className="w-1.5 h-1.5 rounded-full bg-rose-500"></span> Math Error
+                                            </span>
+                                        )}
+                                        {activeReviewInvoice.verification_state === 'truncation_error' && (
+                                            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-50 text-amber-700 border border-amber-200 text-[11px] font-semibold">
+                                                <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span> Needs Review (Truncated)
+                                            </span>
+                                        )}
+                                        {(!activeReviewInvoice.verification_state || (activeReviewInvoice.verification_state !== 'verified' && activeReviewInvoice.verification_state !== 'math_error' && activeReviewInvoice.verification_state !== 'truncation_error')) && (
                                             <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-50 text-amber-700 border border-amber-200 text-[11px] font-semibold">
                                                 <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span> Requires Audit Review
                                             </span>
@@ -1195,12 +1362,33 @@ function App() {
                                             </div>
 
                                             {/* Document Representation & Interactive Overlay */}
-                                            <div className="relative w-full flex items-center justify-center bg-slate-900/5 rounded-lg p-2 overflow-hidden border border-slate-200/60 min-h-[440px]">
-                                                {activeReviewInvoice.fileUrl ? (
+                                            <div 
+                                                ref={invoiceContainerRef}
+                                                onWheel={handleWheel}
+                                                onMouseMove={handleMouseMove}
+                                                onMouseUp={handleMouseUp}
+                                                onMouseLeave={() => {
+                                                    setIsDragging(false);
+                                                }}
+                                                className="w-full h-full min-h-[600px] flex items-center justify-center bg-gray-50 border border-gray-200 rounded-lg overflow-hidden relative select-none overscroll-contain touch-none"
+                                            >
+                                                {getInvoiceImageUrl(activeReviewInvoice) ? (
                                                     <img
-                                                        src={activeReviewInvoice.fileUrl}
-                                                        alt={activeReviewInvoice.fileName}
-                                                        className="max-h-[580px] w-auto max-w-full object-contain rounded shadow-md border border-slate-200"
+                                                        src={getInvoiceImageUrl(activeReviewInvoice)}
+                                                        alt={activeReviewInvoice.fileName || activeReviewInvoice.file_name || "Original Invoice"}
+                                                        draggable={false}
+                                                        className={`max-w-full max-h-full object-contain ${isDragging ? '' : 'transition-transform duration-100 ease-out'} select-none`}
+                                                        style={{ 
+                                                            transform: `scale(${zoomScale}) translate(${pan.x / zoomScale}px, ${pan.y / zoomScale}px)`,
+                                                            cursor: zoomScale > 1 ? (isDragging ? 'grabbing' : 'grab') : 'zoom-in' 
+                                                        }}
+                                                        onWheel={handleWheel}
+                                                        onMouseDown={handleMouseDown}
+                                                        onMouseMove={handleMouseMove}
+                                                        onMouseUp={handleMouseUp}
+                                                        onMouseLeave={() => {
+                                                            setIsDragging(false);
+                                                        }}
                                                     />
                                                 ) : (
                                                     /* Dynamic Fallback Visual Mock Invoice Document */
@@ -1263,6 +1451,11 @@ function App() {
                                                         <span className="bg-amber-600 text-white text-[10px] font-bold px-2 py-0.5 rounded shadow">
                                                             Tax Amounts & Grand Total
                                                         </span>
+                                                    </div>
+                                                )}
+                                                {zoomScale > 1 && (
+                                                    <div className="absolute bottom-2.5 right-2.5 px-2 py-0.5 rounded bg-slate-900/75 text-white text-[11px] font-mono backdrop-blur-xs pointer-events-none select-none z-10 shadow-xs">
+                                                        {Math.round(zoomScale * 100)}%
                                                     </div>
                                                 )}
                                             </div>
@@ -1345,13 +1538,27 @@ function App() {
                                                 </div>
 
                                                 <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-200/70">
-                                                    <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider block mb-0.5">Invoice Date</span>
+                                                    <div className="flex items-center justify-between mb-0.5">
+                                                        <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider block">Invoice Date</span>
+                                                        <span className="text-[10px] font-mono text-slate-500">
+                                                            {activeReviewInvoice?.invoice_date || activeReviewInvoice?.date || activeReviewInvoice?.rawDate || 'Not Extracted'}
+                                                        </span>
+                                                    </div>
                                                     <input
                                                         type="date"
                                                         className="w-full bg-white border border-slate-200 rounded px-2 py-1 text-[13px] font-mono font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                                                        value={parseIndianDateToISO(activeReviewInvoice?.invoiceDate || activeReviewInvoice?.invoice_date || activeReviewInvoice?.date) || ''}
-                                                        onChange={(e) => handleInvoiceChange('invoiceDate', e.target.value)}
+                                                        value={parseIndianDateToISO(activeReviewInvoice?.invoice_date || activeReviewInvoice?.date || activeReviewInvoice?.rawDate || activeReviewInvoice?.invoiceDate) || ''}
+                                                        onChange={(e) => {
+                                                            const val = e.target.value;
+                                                            handleInvoiceChange('invoice_date', val);
+                                                            handleInvoiceChange('date', val);
+                                                            handleInvoiceChange('invoiceDate', val);
+                                                            handleInvoiceChange('rawDate', val);
+                                                        }}
                                                     />
+                                                    <p className="text-[11px] font-mono text-slate-500 mt-1">
+                                                        {activeReviewInvoice?.invoice_date || activeReviewInvoice?.date || activeReviewInvoice?.rawDate || 'Not Extracted'}
+                                                    </p>
                                                 </div>
 
                                                 <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-200/70">
@@ -1734,7 +1941,7 @@ function App() {
                                                 onDragLeave={handleDragLeave}
                                                 onDrop={handleDrop}
                                                 onClick={() => !isUploading && fileInputRef.current && fileInputRef.current.click()}
-                                                className={`group relative border border-dashed ${isDragging ? 'border-blue-500 bg-blue-50/50' : 'border-slate-300 hover:border-slate-400 bg-white'} ${isUploading ? 'opacity-85 pointer-events-none' : ''} transition-all py-5 px-6 text-center rounded-xl shadow-2xs cursor-pointer flex flex-col items-center justify-center`}
+                                                className={`group relative border border-dashed ${isFileDragging ? 'border-blue-500 bg-blue-50/50' : 'border-slate-300 hover:border-slate-400 bg-white'} ${isUploading ? 'opacity-85 pointer-events-none' : ''} transition-all py-5 px-6 text-center rounded-xl shadow-2xs cursor-pointer flex flex-col items-center justify-center`}
                                             >
                                                 <div className={`w-9 h-9 rounded-lg border flex items-center justify-center transition-colors mb-2 ${isUploading ? 'bg-blue-50 border-blue-200 text-blue-600' : 'bg-slate-100 border-slate-200/80 text-slate-500 group-hover:text-slate-800 group-hover:bg-slate-200/60'}`}>
                                                     {isUploading ? (
@@ -1958,7 +2165,7 @@ function App() {
                                                                                 {(inv.invoiceNo || (inv.invoiceNumber && inv.invoiceNumber !== 'Processing...' ? inv.invoiceNumber : null)) || 'Pending'}
                                                                             </span>
                                                                             <span className="text-xs text-slate-500 truncate max-w-[220px]">
-                                                                                ({inv.fileName})
+                                                                                ({inv.fileName}) {inv.invoice_date || inv.date || inv.invoiceDate ? `• ${inv.invoice_date || inv.date || inv.invoiceDate}` : ''}
                                                                             </span>
                                                                         </div>
                                                                     </td>
@@ -1994,24 +2201,29 @@ function App() {
                                                                         {inv.verificationState === 'extracting' ? 'Extracting...' : formatINR(inv.totalAmount)}
                                                                     </td>
                                                                     <td className="px-3 py-1.5 text-center">
-                                                                        {inv.verificationState === 'verified' && (
+                                                                        {inv.verification_state === 'verified' && (
                                                                             <span className="inline-flex items-center gap-1.5 text-[11px] font-medium px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200/70">
                                                                                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span> Verified
                                                                             </span>
                                                                         )}
-                                                                        {inv.verificationState === 'math_error' && (
+                                                                        {inv.verification_state === 'math_error' && (
                                                                             <span className="inline-flex items-center gap-1.5 text-[11px] font-medium px-2 py-0.5 rounded-full bg-rose-50 text-rose-700 border border-rose-200">
                                                                                 <span className="w-1.5 h-1.5 rounded-full bg-rose-500"></span> Math Error
                                                                             </span>
                                                                         )}
-                                                                        {inv.verificationState === 'needs_review' && (
+                                                                        {inv.verification_state === 'truncation_error' && (
                                                                             <span className="inline-flex items-center gap-1.5 text-[11px] font-medium px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200">
-                                                                                <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span> Needs Review
+                                                                                <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span> Needs Review (Truncated)
                                                                             </span>
                                                                         )}
-                                                                        {inv.verificationState === 'extracting' && (
+                                                                        {inv.verification_state === 'extracting' && (
                                                                             <span className="inline-flex items-center gap-1.5 text-[11px] font-medium px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
                                                                                 <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-ping"></span> Extracting...
+                                                                            </span>
+                                                                        )}
+                                                                        {(!inv.verification_state || (inv.verification_state !== 'verified' && inv.verification_state !== 'math_error' && inv.verification_state !== 'truncation_error' && inv.verification_state !== 'extracting')) && (
+                                                                            <span className="inline-flex items-center gap-1.5 text-[11px] font-medium px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200">
+                                                                                <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span> Needs Review
                                                                             </span>
                                                                         )}
                                                                     </td>
